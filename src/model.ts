@@ -16,6 +16,7 @@ import {
   accessToken,
   ProcessTransport,
 } from "@qoder-ai/qoder-agent-sdk";
+import type { SDKUserMessage } from "@qoder-ai/qoder-agent-sdk";
 import { log, logInfo, logError } from "./logger.js";
 import type {
   LanguageModelV3,
@@ -39,6 +40,24 @@ export interface QoderProviderOptions {
   region?: string;
   /** 工作目录 */
   cwd?: string;
+}
+
+/**
+ * 单消息短流：yield 一条携带 content blocks（图片+文本）的 user 消息后立即结束。
+ * SDK 内部对 string prompt 的处理就是包装成同样的单消息流（streamInput 消费完
+ * 即关闭 stdin，CLI 处理完该消息后返回 result，实测 qodercli 1.1.31 行为一致），
+ * 因此短流与 string prompt 生命周期相同，无需挂起等待，无泄漏。
+ */
+function oneShotUserMessage(
+  contentBlocks: SDKUserMessage["message"]["content"],
+): AsyncIterable<SDKUserMessage> {
+  return (async function* () {
+    yield {
+      type: "user",
+      message: { role: "user", content: contentBlocks },
+      parent_tool_use_id: null,
+    };
+  })();
 }
 
 // ─── QoderLanguageModel ─────────────────────────────────────────────────────
@@ -102,7 +121,11 @@ export class QoderLanguageModel implements LanguageModelV3 {
     const systemPrompt = withTransportNotice(built.systemPrompt, bridge !== undefined);
 
     const q = query({
-      prompt: built.userText,
+      // 含图片时走单消息短流：image block 经 wire 协议透传给模型；
+      // 纯文本保持 string prompt 通道（零回归）
+      prompt: built.contentBlocks
+        ? oneShotUserMessage(built.contentBlocks)
+        : built.userText,
       options: {
         auth: accessToken(this.pat),
         model: this.modelDef?.sdkModelId || this.modelId,

@@ -12,12 +12,49 @@ import type { LanguageModelV3Prompt } from "@ai-sdk/provider";
 import { logError } from "./logger.js";
 
 export interface BuiltPrompt {
-  /** 发给 query({ prompt }) 的最终文本 */
+  /** 发给 query({ prompt }) 的最终文本（含图片时为 contentBlocks 的文本部分） */
   userText: string;
+  /**
+   * 最新 user 消息携带的图片 content blocks（image + text）。
+   * 存在时 model.ts 改用 AsyncIterable<SDKUserMessage> 短流发送（image block
+   * 经 wire 协议透传给模型，实测 qodercli 1.1.31 / protocol 1.3.0 可用）；
+   * 无图时 undefined，保持 string prompt 通道。
+   */
+  contentBlocks?: QoderContentBlock[];
   /** 提取出的系统提示词（不含 transport notice） */
   systemPrompt: string;
   /** 是否为多轮（触发 JSON 回放模式） */
   hasHistory: boolean;
+}
+
+// ─── Anthropic 风格 content block ───────────────────────────────────────────
+// SDK 的 ContentBlock 是开放结构（type: string + index signature），这里只
+// 构造图片传输所需的最小形状；用 type alias（非 interface）保证可赋值给
+// 带 index signature 的 SDK ContentBlock。
+export type QoderImageBlock = {
+  type: "image";
+  source: { type: "base64"; media_type: string; data: string };
+};
+export type QoderTextBlock = {
+  type: "text";
+  text: string;
+};
+export type QoderContentBlock = QoderImageBlock | QoderTextBlock;
+
+/**
+ * AI SDK file part → Anthropic 风格 image block。
+ * 仅接受 image/* 且带有效 base64 数据的 part；其余返回 undefined（调用方占位降级）。
+ * data 兼容 AI SDK V3 的两种形态：base64 字符串或 Uint8Array，并容错 data URL 前缀。
+ */
+function filePartToImageBlock(part: any): QoderImageBlock | undefined {
+  const mediaType = typeof part?.mediaType === "string" ? part.mediaType : "";
+  if (!mediaType.startsWith("image/")) return undefined;
+  let data = part.data;
+  if (data instanceof Uint8Array) data = Buffer.from(data).toString("base64");
+  if (typeof data !== "string" || data.length === 0) return undefined;
+  const dataUrl = /^data:image\/[^;,]+;base64,/.exec(data);
+  if (dataUrl) data = data.slice(dataUrl[0].length);
+  return { type: "image", source: { type: "base64", media_type: mediaType, data } };
 }
 
 function toolResultToText(output: any): { text: string; isError: boolean } {
@@ -62,6 +99,10 @@ export function buildQoderPrompt(
   const systemParts: string[] = [];
   const transcript: unknown[] = [];
   let latestUserText = "";
+  // 仅最新 user 消息携带的图片会被传输；历史消息中的图片继续占位符降级
+  // （transcript JSON 保持纯文本，base64 不进回放，与 pi-qoder-provider 一致）
+  const lastUserMsg = [...prompt].reverse().find((m) => (m as any).role === "user");
+  const latestImageBlocks: QoderImageBlock[] = [];
 
   const providerName = (name: string): string =>
     toProviderToolName?.(name) ?? name;
@@ -73,12 +114,16 @@ export function buildQoderPrompt(
     }
 
     if (msg.role === "user") {
+      const isLatestUser = msg === lastUserMsg;
       const texts: string[] = [];
       for (const part of msg.content as any[]) {
         if (part.type === "text") texts.push(part.text);
-        // 图片/文件当前不向 qodercli 传输（占位符降级），
-        // 因此模型元数据（models.ts）只声明 text 输入
-        else if (part.type === "file") texts.push(`[file: ${part.mediaType || "unknown"}]`);
+        else if (part.type === "file") {
+          const imageBlock = isLatestUser ? filePartToImageBlock(part) : undefined;
+          if (imageBlock) latestImageBlocks.push(imageBlock);
+          // 非图片、无数据或历史消息中的文件：占位符降级（不向 qodercli 传输）
+          else texts.push(`[file: ${part.mediaType || "unknown"}]`);
+        }
       }
       const text = texts.join("\n");
       transcript.push({ role: "user", content: text });
@@ -150,12 +195,21 @@ export function buildQoderPrompt(
     (m: any) => m.role === "assistant" || m.role === "toolResult",
   );
 
+  // 最新 user 消息带图时，图片 block 在前、文本在后（Anthropic content 顺序），
+  // 文本部分与 userText 完全一致——两条通道（string / contentBlocks）共享
+  // 同一份文本，模型看到的语义不变
+  const finish = (userText: string, hasHistory: boolean): BuiltPrompt => ({
+    userText,
+    contentBlocks:
+      latestImageBlocks.length > 0
+        ? [...latestImageBlocks, { type: "text", text: userText }]
+        : undefined,
+    systemPrompt: systemParts.join("\n\n"),
+    hasHistory,
+  });
+
   if (!hasHistory) {
-    return {
-      userText: latestUserText || "Continue.",
-      systemPrompt: systemParts.join("\n\n"),
-      hasHistory: false,
-    };
+    return finish(latestUserText || "Continue.", false);
   }
 
   const replay = JSON.stringify(transcript);
@@ -167,11 +221,7 @@ export function buildQoderPrompt(
     `Transcript JSON: ${replay}`,
   ].join("\n");
 
-  return {
-    userText: prefix,
-    systemPrompt: systemParts.join("\n\n"),
-    hasHistory: true,
-  };
+  return finish(prefix, true);
 }
 
 /**

@@ -203,8 +203,12 @@ src/
 
 ## 已知限制
 
-1. **图片输入未实现**：所有模型当前只声明 `text` 输入。opencode 发来的图片/文件
-   在 transcript 中降级为 `[file: mediaType]` 占位符，模型收不到图片数据
+1. **图片输入部分支持**：最新 user 消息中的图片会以 Anthropic 风格 image block
+   经 qodercli wire 协议透传给模型（实测 qodercli 1.1.31，global auto 与动态
+   目录中服务端标记 `is_vl` 的模型声明 `image` 输入；CN 区域未实测暂保持
+   text-only）。其余场景仍降级为 `[file: mediaType]` 占位符：历史消息中的
+   图片（回放 JSON 保持纯文本）、工具结果中的图片（如 Read 读图）、以及
+   非图片文件
 2. **token 统计为估算值，$ spent 实为 Credits**：qodercli 不上报真实 token
    计数（实测 `input_tokens`/`output_tokens`/`cache_*` 恒为 0，仅
    `context_usage_ratio` 与 `credits` 有效）。本包用 ratio × 模型上下文窗口

@@ -40,14 +40,18 @@ describe("resolveRegion", () => {
   });
 });
 
-describe("静态模型表（text-only 不变量）", () => {
+describe("静态模型表（input 声明不变量）", () => {
   it("Global 与 CN 表均非空", () => {
     expect(staticGlobalModels.length).toBeGreaterThan(0);
     expect(staticCnModels.length).toBeGreaterThan(0);
   });
 
-  it("所有模型只声明 text 输入（图片传输未实现）", () => {
-    for (const m of [...staticGlobalModels, ...staticCnModels]) {
+  it("global auto 声明 image 输入（已实测透传），其余保持 text-only", () => {
+    for (const m of staticGlobalModels) {
+      expect(m.input).toEqual(m.id === "auto" ? ["text", "image"] : ["text"]);
+    }
+    // CN 区域链路未实测图片透传，保守声明
+    for (const m of staticCnModels) {
       expect(m.input).toEqual(["text"]);
     }
   });

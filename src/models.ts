@@ -108,18 +108,22 @@ const CN_FRIENDLY: Record<string, { id: string; name: string; sdkKey: string }> 
 // 静态表只保留 Qoder 官方路由模型，作为网络不可用时的最后兜底；第三方模型
 // （Qwen/Kimi/GLM/DeepSeek/MiniMax/Cantus 等）迭代频繁且 ID/上下文随服务端
 // 变化，完整目录一律以动态获取（fetchModelCatalog）为准。
-// 注意：所有模型统一声明 input: ["text"]——图片数据当前不会向 qodercli 传输
-// （context.ts 使用占位符降级），声明 image 会导致 opencode 向模型发送
-// 无法被处理的图片。待实现图片传输后再按各模型实际能力放开。
+//
+// input 声明决定 opencode 是否把图片 part 传给 provider。仅声明已实测的组合：
+// global auto（官方路由，实测 image block 经 stream-json / SDK 短流透传到模型，
+// qodercli 1.1.31 / protocol 1.3.0）。其余模型未逐个实测，保持 text-only——
+// 错误的 image 声明会让 opencode 发送模型无法处理的图片；声明 text-only 时
+// 图片只会被 context.ts 占位降级，不会报错。
 export const staticGlobalModels: QoderModelDef[] = [
-  { id: "auto",        name: "Qoder Auto",        reasoning: true,  input: ["text"], contextWindow: 180_000,   maxTokens: 32768, sdkModelId: "auto" },
+  { id: "auto",        name: "Qoder Auto",        reasoning: true,  input: ["text", "image"], contextWindow: 180_000,   maxTokens: 32768, sdkModelId: "auto" },
   { id: "ultimate",    name: "Qoder Ultimate",    reasoning: true,  input: ["text"], contextWindow: 1_000_000, maxTokens: 32768, sdkModelId: "ultimate" },
   { id: "performance", name: "Qoder Performance", reasoning: true,  input: ["text"], contextWindow: 1_000_000, maxTokens: 32768, sdkModelId: "performance" },
   { id: "efficient",   name: "Qoder Efficient",   reasoning: false, input: ["text"], contextWindow: 180_000,   maxTokens: 32768, sdkModelId: "efficient" },
   { id: "lite",        name: "Qoder Lite",        reasoning: false, input: ["text"], contextWindow: 180_000,   maxTokens: 32768, sdkModelId: "lite" },
 ];
 
-// CN 静态兜底同样只保留官方路由模型 auto；第三方模型由动态目录提供
+// CN 静态兜底同样只保留官方路由模型 auto；CN 区域链路未实测图片透传，
+// 先保持 text-only（CN auto 未单独验证），第三方模型由动态目录提供
 export const staticCnModels: QoderModelDef[] = [
   { id: "auto", name: "Auto · Qoder CN", reasoning: true, input: ["text"], contextWindow: 180_000, maxTokens: 32768, sdkModelId: "auto" },
 ];
@@ -431,7 +435,9 @@ export async function fetchModelCatalog(
     const key = entry.key as string;
     if (!key || !entry.enable) continue;
     const display = (entry.display_name as string) || key;
-    // is_vl 字段暂不启用（图片传输未实现，所有模型声明 text-only）
+    // is_vl 标记服务端视觉模型；图片经 wire 协议透传已实测可用（qodercli
+    // 1.1.31），按服务端声明放开，未标记的仍 text-only
+    const isVl = entry.is_vl === true;
     const isReasoning = !!entry.is_reasoning || !!entry.thinking_config;
 
     let ctxLen = (entry.max_input_tokens as number) || 180_000;
@@ -450,20 +456,20 @@ export async function fetchModelCatalog(
       id: friendly?.id ?? key,
       name: friendly?.name ?? display,
       reasoning: isReasoning,
-      input: ["text"],
+      input: isVl ? ["text", "image"] : ["text"],
       contextWindow: ctxLen,
       maxTokens: (entry.max_output_tokens as number) || 32768,
       sdkModelId: key,
     });
   }
 
-  // 确保 auto 存在
+  // 确保 auto 存在（与静态表 input 声明一致：global auto 放开 image，CN 保守）
   if (!models.some((m) => m.id === "auto")) {
     models.unshift({
       id: "auto",
       name: region === "cn" ? "Auto · Qoder CN" : "Qoder Auto",
       reasoning: true,
-      input: ["text"],
+      input: region === "cn" ? ["text"] : ["text", "image"],
       contextWindow: 180_000,
       maxTokens: 32768,
       sdkModelId: "auto",

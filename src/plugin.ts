@@ -80,9 +80,13 @@ function toModelSpec(m: QoderModelDef) {
     name: m.name,
     reasoning: m.reasoning,
     tool_call: true,
-    attachment: false,
+    // attachment/modalities 必须跟随模型目录的 input 声明：声明 image 的模型
+    // opencode 才会把用户消息中的图片作为 file part 传给 provider，
+    // 进而由 context.ts 转成 image block 透传给模型；硬编码 text-only 会让
+    // opencode 在宿主层剥掉图片，模型只能看到占位文本
+    attachment: m.input.includes("image"),
     status: "active" as const,
-    modalities: { input: ["text"], output: ["text"] },
+    modalities: { input: [...m.input], output: ["text"] },
     limit: { context: m.contextWindow, output: m.maxTokens },
     cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
   };

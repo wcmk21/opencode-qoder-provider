@@ -21,11 +21,12 @@ describe("buildQoderPrompt 单轮（无历史）", () => {
     expect(r.hasHistory).toBe(false);
   });
 
-  it("user file part 降级为占位符（图片不传输）", () => {
+  it("无数据/非图片的 file part 降级为占位符（不传输）", () => {
     const r = buildQoderPrompt([
       { role: "user", content: [{ type: "file", mediaType: "image/png" }] },
     ] as any);
     expect(r.userText).toBe("[file: image/png]");
+    expect(r.contentBlocks).toBeUndefined();
   });
 
   it("多个 system 消息以空行合并", () => {
@@ -142,6 +143,88 @@ describe("buildQoderPrompt 多轮（JSON transcript 回放）", () => {
     ] as any);
     expect(r.hasHistory).toBe(false);
     expect(r.userText).toBe("x");
+  });
+});
+
+describe("buildQoderPrompt 图片输入（仅最新 user 消息）", () => {
+  const imgPart = (mediaType = "image/png", data = "AA=="): any => ({
+    type: "file",
+    mediaType,
+    data,
+  });
+
+  it("单轮：图片转为 image block（在前）+ 文本 block，文本无占位符", () => {
+    const r = buildQoderPrompt([
+      { role: "user", content: [imgPart(), { type: "text", text: "hi" }] },
+    ] as any);
+    expect(r.userText).toBe("hi");
+    expect(r.contentBlocks).toEqual([
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } },
+      { type: "text", text: "hi" },
+    ]);
+  });
+
+  it("多轮：base64 不进回放 JSON，图片走 contentBlocks", () => {
+    const r = buildQoderPrompt([
+      userMsg("x"),
+      { role: "assistant", content: [{ type: "text", text: "done" }] },
+      { role: "user", content: [imgPart("image/jpeg", "BB=="), { type: "text", text: "look" }] },
+    ] as any);
+    expect(r.hasHistory).toBe(true);
+    // base64 绝不进入 transcript 文本（体积/注入面控制）
+    expect(r.userText).not.toContain("BB==");
+    const lastUser = parseReplay(r.userText).filter((m) => m.role === "user").pop();
+    expect(lastUser.content).toBe("look");
+    expect(r.contentBlocks).toEqual([
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "BB==" } },
+      { type: "text", text: expect.stringContaining("Transcript JSON:") },
+    ]);
+  });
+
+  it("历史（非最新）user 的图片占位降级，无 contentBlocks", () => {
+    const r = buildQoderPrompt([
+      { role: "user", content: [imgPart(), { type: "text", text: "old" }] },
+      { role: "assistant", content: [{ type: "text", text: "done" }] },
+      userMsg("new"),
+    ] as any);
+    expect(r.contentBlocks).toBeUndefined();
+    expect(parseReplay(r.userText)[0].content).toBe("[file: image/png]\nold");
+  });
+
+  it("非图片 file 与无数据 image 均占位降级", () => {
+    const r = buildQoderPrompt([
+      {
+        role: "user",
+        // 第二个 part 刻意无 data 字段：无数据的 image 也必须降级
+        content: [imgPart("application/pdf", "AA=="), { type: "file", mediaType: "image/png" }, { type: "text", text: "x" }],
+      },
+    ] as any);
+    expect(r.contentBlocks).toBeUndefined();
+    expect(r.userText).toBe("[file: application/pdf]\n[file: image/png]\nx");
+  });
+
+  it("Uint8Array data 转 base64 字符串", () => {
+    const bytes = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+    const r = buildQoderPrompt([
+      {
+        role: "user",
+        content: [{ type: "file", mediaType: "image/png", data: bytes }, { type: "text", text: "x" }],
+      },
+    ] as any);
+    expect(r.contentBlocks?.[0]).toEqual({
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: Buffer.from(bytes).toString("base64") },
+    });
+  });
+
+  it("data URL 前缀被剥离", () => {
+    const r = buildQoderPrompt([
+      {
+        role: "user",
+        content: [imgPart("image/png", "data:image/png;base64,AA=="), { type: "text", text: "x" }],
+      },
+    ] as any);
+    expect(r.contentBlocks?.[0]).toMatchObject({ source: { data: "AA==" } });
   });
 });
 
