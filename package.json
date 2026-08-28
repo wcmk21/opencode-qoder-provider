@@ -37,6 +37,10 @@
     "./plugin": {
       "import": "./dist/plugin.js",
       "types": "./dist/plugin.d.ts"
+    },
+    "./server": {
+      "import": "./dist/plugin.js",
+      "types": "./dist/plugin.d.ts"
     }
   },
   "engines": {
