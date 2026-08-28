@@ -3,18 +3,23 @@
   "provider": {
     "qoder": {
       "name": "Qoder",
-      "npm": "opencode-qoder-provider",
+      // 本插件不经 npm 分发：file:// 指向构建产物（先 clone 仓库并 npm run build）。
+      // 若 dist/ 已提交进仓库，也可写成 "github:wcmk21/opencode-qoder-provider"。
+      "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
       "options": {
         "region": "global"
       }
     },
     "qoder-cn": {
       "name": "Qoder CN",
-      "npm": "opencode-qoder-provider",
+      "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
       "options": {
         "region": "cn"
       }
     }
   },
-  "plugin": ["opencode-qoder-provider/plugin"]
+  // plugin 直接指向 dist/plugin.js 文件（路径按 opencode.json 所在目录解析）；
+  // 也可以把 dist/plugin.js 放入 ~/.config/opencode/plugins/ 全局插件目录，
+  // 由 opencode 启动时自动加载，此字段即可省略。
+  "plugin": ["C:/path/to/opencode-qoder-provider/dist/plugin.js"]
 }

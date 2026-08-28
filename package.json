@@ -2,8 +2,17 @@
   "name": "opencode-qoder-provider",
   "version": "0.1.0",
   "description": "Qoder AI provider for OpenCode — based on @qoder-ai/qoder-agent-sdk",
+  "author": "wcmk21",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wcmk21/opencode-qoder-provider.git"
+  },
+  "homepage": "https://github.com/wcmk21/opencode-qoder-provider#readme",
+  "bugs": {
+    "url": "https://github.com/wcmk21/opencode-qoder-provider/issues"
+  },
   "publishConfig": {
     "access": "public"
   },

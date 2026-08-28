@@ -15,12 +15,12 @@
  * {
  *   "provider": {
  *     "qoder": {
- *       "npm": "opencode-qoder-provider",
+ *       "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
  *       "name": "Qoder",
  *       "options": { "region": "global" }
  *     }
  *   },
- *   "plugin": ["opencode-qoder-provider/plugin"]
+ *   "plugin": ["C:/path/to/opencode-qoder-provider/dist/plugin.js"]
  * }
  */
 import type { Plugin, Config } from "@opencode-ai/plugin";

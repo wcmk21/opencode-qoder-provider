@@ -1,9 +1,20 @@
 # opencode-qoder-provider
 
+[![CI](https://github.com/wcmk21/opencode-qoder-provider/actions/workflows/ci.yml/badge.svg)](https://github.com/wcmk21/opencode-qoder-provider/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 基于 `@qoder-ai/qoder-agent-sdk` 的 [OpenCode](https://opencode.ai) Qoder Provider 插件。
 
 把 Qoder 官方 CLI（qodercli）当作**无状态的语言模型后端**接入 opencode：
 opencode 保留完整的 agent 循环与工具执行权，qodercli 只负责推理。
+
+## 前提条件
+
+1. **Qoder 账号与 PAT**：本插件通过 Qoder Personal Access Token（PAT，`pt-` 开头）认证。
+   创建方式：登录 Qoder → 打开 Account → Integrations → 选择有效期与所需权限并创建 PAT，
+   生成后立即复制（官方文档：[SDK Authentication](https://docs.qoder.com/cli/sdk/authentication)）
+2. **OpenCode**：建议使用较新版本（本插件依赖 opencode 的 plugin `config` hook 注入模型目录）
+3. **网络**：首次启动需要访问 Qoder 服务端获取模型目录；完全离线时仅有静态兜底模型可用
 
 ## 特性
 
@@ -26,7 +37,7 @@ opencode TUI
   │  LanguageModelV3 接口
   ↓
 ┌──────────────────────────────────────────────┐
-│  opencode-qoder-provider                      │
+│  opencode-qoder-provider                     │
 │  ┌────────────────────────────────────────┐  │
 │  │  QoderLanguageModel (model.ts)         │  │
 │  │  - doStream() / doGenerate()           │  │
@@ -67,32 +78,106 @@ opencode TUI
 
 ## 安装
 
-无需手动安装。在 `opencode.json` 的 provider 配置中写上 `"npm": "opencode-qoder-provider"`，
-opencode 启动时会自动拉取并缓存到 `~/.cache/opencode/packages/`。
+本插件**不经 npm 分发**，通过 opencode 的依赖解析机制直接加载本地或 Git 仓库中的
+构建产物。共两步：获取产物 → 接入 opencode。
 
-也可以手动安装调试：
+### 第一步：获取构建产物
 
 ```bash
-npm install opencode-qoder-provider
-# 本地开发时可用 file:// 协议直接指向构建产物
-# "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js"
+git clone https://github.com/wcmk21/opencode-qoder-provider.git
+cd opencode-qoder-provider
+npm install && npm run build   # 构建产物在 dist/
 ```
+
+### 第二步：接入 opencode
+
+**方式 A：项目级接入（推荐）** — 在项目的 opencode.json 中用 `file://` 指向构建产物。
+注意两点：`provider.npm` 指向 `dist/index.js`；`plugin` 数组直接指向 `dist/plugin.js`
+文件（npm 包名未发布时无法被解析）：
+
+```jsonc
+{
+  "provider": {
+    "qoder": {
+      "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
+      "name": "Qoder",
+      "options": { "region": "global" }
+    }
+  },
+  "plugin": ["C:/path/to/opencode-qoder-provider/dist/plugin.js"]
+}
+```
+
+**方式 B：全局接入（多项目共用）** — 不想每个项目都写配置时，把上面的
+`provider` + `plugin` 声明放进 opencode 的全局配置
+`~/.config/opencode/opencode.json`（Windows：`%USERPROFILE%\.config\opencode\opencode.json`）；
+`file://` 按绝对路径解析，全局声明对所有项目生效。`plugin` 部分也可以改为把
+`dist/plugin.js` 放入全局插件目录 `~/.config/opencode/plugins/`（目录不存在则创建），
+该目录下的文件启动时自动加载，无需 `plugin` 字段。
+
+**方式 C：项目内依赖（插件侧）** — 在项目 `.opencode/package.json` 中以 `file:`
+依赖引入本包，opencode 启动时会自动安装到 `.opencode/node_modules`，项目插件
+目录中放一个两行转发器即可（构建更新后无需再手动拷贝产物）：
+
+```jsonc
+// .opencode/package.json
+{ "dependencies": { "opencode-qoder-provider": "file:../opencode-qoder-provider" } }
+```
+
+```ts
+// .opencode/plugins/qoder.ts
+import { QoderPlugin } from "opencode-qoder-provider/plugin"
+export default QoderPlugin
+```
+
+> provider 侧（`provider.npm`）仍需方式 A 的 `file://` 写法；方式 C 只优化插件侧的
+> 依赖管理与产物同步。
+
+**方式 D：Git 直装（分发给别人）** — 将 `dist/` 从 `.gitignore` 移除并提交（或把
+构建 tarball 挂到 GitHub Releases），使用者无需 clone，直接写：
+
+```jsonc
+"npm": "github:wcmk21/opencode-qoder-provider"
+```
+
+opencode 底层用 Bun 安装依赖，支持 `github:` / `git+https` / tarball URL 规格。
+`plugin` 侧让使用者把 `dist/plugin.js` 放入其全局插件目录即可。
+
+> **提示**：修改源码重新 build 后若行为未变化，需清理 opencode 的包缓存
+> （`~/.cache/opencode/packages/`，Windows 为 `%USERPROFILE%\.cache\opencode\packages\`）
+> 并重启 opencode，避免加载到旧版本。
 
 ## 配置
 
 ### 1. 设置 PAT
 
 ```bash
-# Global 区域
+# macOS / Linux —— Global 区域
 export QODER_PERSONAL_ACCESS_TOKEN=pt-your-token-here
 
 # CN 区域（CN 区优先读取；未设置时回退到 QODER_PERSONAL_ACCESS_TOKEN）
 export QODERCN_PERSONAL_ACCESS_TOKEN=pt-your-cn-token-here
 ```
 
+```powershell
+# Windows PowerShell（仅当前会话生效）
+$env:QODER_PERSONAL_ACCESS_TOKEN = "pt-your-token-here"
+
+# 持久化到当前用户（重开终端后生效）
+[Environment]::SetEnvironmentVariable("QODER_PERSONAL_ACCESS_TOKEN", "pt-your-token-here", "User")
+```
+
+也可以不设环境变量，直接在 opencode.json 的 provider `options` 中传入
+（注意 PAT 明文会留在配置文件中，不要把该文件提交到版本库）：
+
+```jsonc
+"options": { "region": "global", "apiKey": "pt-your-token-here" }
+```
+
 ### 2. opencode.json
 
-完整示例见 [opencode.json.example](./opencode.json.example)。最小配置：
+完整示例见 [opencode.json.example](./opencode.json.example)。最小配置（接入方式
+见上文"安装"）：
 
 ```jsonc
 {
@@ -100,11 +185,11 @@ export QODERCN_PERSONAL_ACCESS_TOKEN=pt-your-cn-token-here
   "provider": {
     "qoder": {
       "name": "Qoder",
-      "npm": "opencode-qoder-provider",
+      "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
       "options": { "region": "global" }
     }
   },
-  "plugin": ["opencode-qoder-provider/plugin"]
+  "plugin": ["C:/path/to/opencode-qoder-provider/dist/plugin.js"]
 }
 ```
 
@@ -119,6 +204,20 @@ export QODERCN_PERSONAL_ACCESS_TOKEN=pt-your-cn-token-here
 > ```jsonc
 > "models": { "auto": { "name": "自定义显示名" } }
 > ```
+>
+> **注意**：手动声明的模型 ID 若不在目录中，会以仅含 `name` 的精简声明出现
+> （缺少上下文窗口等元数据），建议仅覆盖目录中已有的模型 ID。
+
+**设为默认模型**：在 opencode.json 顶层加 `"model"`（格式 `provider/模型ID`），
+新会话将直接使用 Qoder，无需每次 /models 切换：
+
+```jsonc
+{ "model": "qoder/auto" }
+```
+
+**双区域并存**：Global 与 CN 可以同时配置为两个 provider，模型选择器中
+会出现 `Qoder` 与 `Qoder CN` 两组模型，完整写法见
+[opencode.json.example](./opencode.json.example)。
 
 ### 3. 环境变量参考
 
@@ -129,14 +228,24 @@ export QODERCN_PERSONAL_ACCESS_TOKEN=pt-your-cn-token-here
 | `QODER_REGION` | 默认区域：`global`（默认）/ `cn` |
 | `QODER_DEBUG` | 设为 `1` 启用 debug 级日志（见下文"日志"） |
 | `QODER_CLI_PATH` | 显式指定 qodercli.js 路径（一般无需设置，插件自带 CLI） |
+| `QODER_PAT` | `QODER_PERSONAL_ACCESS_TOKEN` 的别名（仅模型调用侧读取，不影响模型目录注入；推荐统一使用前者） |
 
 ### 4. 使用
 
 ```bash
 opencode
-# TUI 中：
-# /models 选择 Qoder 模型（全部目录模型自动出现，无需声明）
 ```
+
+启动后 `/models` 中应出现 `Qoder`（及 `Qoder CN`）分组——分组内即动态目录
+注入的全部模型，选中即用。
+
+- **切换模型**：TUI 中 `/models` 选择，或 `/models qoder` 快速过滤
+- **默认模型**：通过顶层 `"model"` 配置固定（见上文）
+- **图片输入**：仅声明支持 `image` 的模型可贴图（动态目录中服务端标记
+  `is_vl` 的模型，以及静态兜底中的 Global `auto`）；其余模型中图片会被
+  降级为占位文本，不会报错
+- **验证生效**：日志中出现 `injected N models into provider ...` 即说明
+  模型目录注入成功（见下文"日志"与"故障排查"）
 
 ## 可用模型
 
@@ -157,19 +266,29 @@ MiniMax / Cantus 等）迭代频繁，不进入静态表，由动态目录提供
 
 ### CN（静态兜底）
 
-| 模型 ID | 名称 | SDK Key | 推理 | 上下文 |
-|---------|------|---------|:----:|-------:|
-| `auto` | Auto · Qoder CN | auto | ✅ | 180K |
+| 模型 ID | 名称 | 推理 | 上下文 |
+|---------|------|:----:|-------:|
+| `auto` | Auto · Qoder CN | ✅ | 180K |
 
 获取失败时自动使用上表静态列表；也可在 opencode.json 中手动声明以覆盖个别字段
 （如自定义显示名）。
 
 ## 日志
 
-- 位置：`~/.local/state/opencode/qoder-provider.log`
+- 位置：`~/.local/state/opencode/qoder-provider.log`（Windows：`%USERPROFILE%\.local\state\opencode\qoder-provider.log`）
 - 默认记录 INFO / ERROR 级别（`logInfo` / `logError`），**不会污染 TUI 渲染**
 - 设置 `QODER_DEBUG=1` 后追加 DEBUG 级日志。**注意**：DEBUG 日志包含发往模型的
   prompt 片段（截断至 300 字符），可能含敏感代码/对话内容，排查后请关闭
+
+## 故障排查
+
+| 现象 | 排查步骤 |
+|------|----------|
+| `/models` 中没有 Qoder 分组 | 1）确认 opencode.json 同时配置了 `provider` 与 `plugin` 字段（两者缺一不可）；2）查看日志中是否有 `[qoder-plugin] injected N models`；3）PAT 未设置时仅会出现静态兜底模型（5 个官方路由模型），而不是完整目录 |
+| 模型列表比预期少 | 模型目录来自 HTTP API（1 小时缓存）。看日志是否有 403 / 网络错误；删除模型缓存 `~/.opencode/qoder-models.json`（CN 为 `qoder-cn-models.json`）后重启强制刷新 |
+| 调用报 `Set QODER_PERSONAL_ACCESS_TOKEN` | PAT 未传到模型调用层：确认环境变量名拼写（CN 区需 `QODERCN_PERSONAL_ACCESS_TOKEN`），或改用 `options.apiKey`；Windows 下 `$env:` 设置仅在当前会话生效 |
+| 修改配置 / 重新构建后不生效 | 清理 opencode 包缓存 `~/.cache/opencode/packages/` 与模型目录缓存 `~/.opencode/qoder-*.json`，重启 opencode（opencode 启动时缓存旧插件与目录） |
+| 响应异常 / 请求失败 | 设置 `QODER_DEBUG=1` 重启复现，提取日志中 ERROR / DEBUG 段提 issue（注意脱敏，DEBUG 含 prompt 片段） |
 
 ## 项目结构
 
