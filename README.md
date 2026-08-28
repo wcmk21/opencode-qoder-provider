@@ -15,7 +15,8 @@ opencode 保留完整的 agent 循环与工具执行权，qodercli 只负责推�
 - **无状态单轮**：每次请求独立进程，`maxTurns: 1` + `persistSession: false`，
   多轮上下文由 opencode 管理
 - **双区支持**：Global / CN 区域与各自的模型目录
-- **动态模型目录**：HTTP API 获取模型列表（1 小时缓存），失败时回退静态列表
+- **动态模型目录自动注入**：插件 config hook 在启动时把模型目录（HTTP API + 静态 fallback）
+  注入 opencode 配置，模型选择器**无需手动声明任何模型**
 
 ## 架构
 
@@ -100,19 +101,24 @@ export QODERCN_PERSONAL_ACCESS_TOKEN=pt-your-cn-token-here
     "qoder": {
       "name": "Qoder",
       "npm": "opencode-qoder-provider",
-      "options": { "region": "global" },
-      "models": {
-        "auto": { "name": "Qoder Auto" },
-        "ultimate": { "name": "Qoder Ultimate" }
-      }
+      "options": { "region": "global" }
     }
   },
   "plugin": ["opencode-qoder-provider/plugin"]
 }
 ```
 
-> **重要**：opencode UI 只渲染 `opencode.json` 中 `models` 字段显式声明的模型，
-> provider 内部返回的模型目录不会自动出现在模型选择器里。请按需列出要使用的模型 ID。
+> **重要**：`plugin` 字段是必需的。opencode 的模型列表只来自 config 中
+> `provider.models` 的声明，provider 包内部返回的模型目录不会被读取；
+> 本包通过插件的 config hook 在启动时把动态目录（HTTP API + 静态 fallback，
+> 含 1 小时缓存）自动写入 `provider.models`。
+>
+> 手动声明是可选的：若在 opencode.json 中写了 `models`，其中字段
+> （如自定义 `name`）会覆盖注入的默认值，未声明的模型仍会自动出现：
+>
+> ```jsonc
+> "models": { "auto": { "name": "自定义显示名" } }
+> ```
 
 ### 3. 环境变量参考
 
@@ -129,40 +135,34 @@ export QODERCN_PERSONAL_ACCESS_TOKEN=pt-your-cn-token-here
 ```bash
 opencode
 # TUI 中：
-# /models 选择 Qoder 模型
+# /models 选择 Qoder 模型（全部目录模型自动出现，无需声明）
 ```
 
 ## 可用模型
 
-### Global
+模型列表以**动态目录**为准（HTTP API 获取，每小时刷新，由插件 config hook 在启动时
+自动注入，无需手动声明）；服务端上线新模型后自动出现。下表仅为网络不可用时的
+静态兜底，只保留 Qoder 官方路由模型；第三方模型（Qwen / Kimi / GLM / DeepSeek /
+MiniMax / Cantus 等）迭代频繁，不进入静态表，由动态目录提供。
+
+### Global（静态兜底）
 
 | 模型 ID | 名称 | 推理 | 上下文 |
 |---------|------|:----:|-------:|
-| `auto` | Qoder Auto | ✅ | 180K |
-| `ultimate` | Qoder Ultimate | ✅ | 1M |
-| `performance` | Qoder Performance | ✅ | 1M |
-| `efficient` | Qoder Efficient | ❌ | 180K |
-| `lite` | Qoder Lite | ❌ | 180K |
-| `qmodel` | Qwen3.7 Plus | ❌ | 1M |
-| `qmodel_latest` | Qwen3.7 Max | ❌ | 1M |
-| `dmodel` | DeepSeek V4 Pro | ✅ | 1M |
-| `kmodel` | Kimi K2.6 | ❌ | 256K |
+| `auto` | Auto | ✅ | 180K |
+| `ultimate` | Ultimate | ✅ | 1M |
+| `performance` | Performance | ✅ | 1M |
+| `efficient` | Efficient | ❌ | 180K |
+| `lite` | Lite | ❌ | 180K |
 
-### CN
+### CN（静态兜底）
 
 | 模型 ID | 名称 | SDK Key | 推理 | 上下文 |
 |---------|------|---------|:----:|-------:|
 | `auto` | Auto · Qoder CN | auto | ✅ | 180K |
-| `qwen3.7-max` | Qwen 3.7 Max | qmodel_latest | ✅ | 1M |
-| `qwen3.7-plus` | Qwen 3.7 Plus | qmodel | ✅ | 1M |
-| `qwen3.6-flash` | Qwen 3.6 Flash | q36fmodel | ✅ | 1M |
-| `deepseek-v4-pro` | DeepSeek V4 Pro | dmodel | ✅ | 1M |
-| `deepseek-v4-flash` | DeepSeek V4 Flash | dfmodel | ❌ | 1M |
-| `glm-5.2` | GLM 5.2 | gm51model | ✅ | 200K |
-| `kimi-k2.6` | Kimi K2.6 | kmodel | ✅ | 256K |
-| `minimax-m2.7` | MiniMax M2.7 | mmodel | ❌ | 200K |
 
-动态目录每小时刷新一次；获取失败时自动使用上表静态列表。
+获取失败时自动使用上表静态列表；也可在 opencode.json 中手动声明以覆盖个别字段
+（如自定义显示名）。
 
 ## 日志
 
@@ -183,7 +183,7 @@ src/
 ├── models.ts       # 模型目录管理（HTTP API + 静态 fallback + 缓存）
 ├── cli-path.ts     # qodercli.js 路径解析（Windows file:// URL 兼容）
 ├── logger.ts       # 文件日志（避免污染 TUI）
-└── plugin.ts       # opencode Plugin 入口（session 事件 / 缓存刷新）
+└── plugin.ts       # opencode Plugin 入口（config hook 注入模型目录 / 事件处理）
 ```
 
 ## 与 pi-qoder-provider 的关系
@@ -209,9 +209,7 @@ src/
    token 统计可能缺失（SDK 上游行为）
 3. **每请求冷启动**：无状态设计意味着每次请求都 spawn 一个新的 qodercli 进程，
    首包延迟高于常驻连接
-4. **动态模型目录可能 403**：COSY 签名对部分账号/区域可能被拒绝（排查中），
-   此时自动回退静态模型列表，不影响正常使用
-5. **Bun 运行时**：opencode 是 Bun 编译二进制，SDK 默认 WorkerTransport 不兼容，
+4. **Bun 运行时**：opencode 是 Bun 编译二进制，SDK 默认 WorkerTransport 不兼容，
    本包强制使用 ProcessTransport 运行 `@qoder-ai/qodercli` 自带的 JS 版 CLI
 
 ## 开发

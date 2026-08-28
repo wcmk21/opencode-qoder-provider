@@ -71,6 +71,17 @@ describe("静态模型表（text-only 不变量）", () => {
     expect(staticGlobalModels.some((m) => m.id === "auto")).toBe(true);
     expect(staticCnModels.some((m) => m.id === "auto")).toBe(true);
   });
+
+  it("静态兜底仅保留官方路由模型（第三方模型以动态目录为准）", () => {
+    expect(staticGlobalModels.map((m) => m.id).sort()).toEqual([
+      "auto",
+      "efficient",
+      "lite",
+      "performance",
+      "ultimate",
+    ]);
+    expect(staticCnModels.map((m) => m.id)).toEqual(["auto"]);
+  });
 });
 
 describe("缓存读取与查找", () => {

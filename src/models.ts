@@ -2,7 +2,7 @@
  * models.ts — Qoder model catalog
  *
  * 模型目录管理：
- *  - 静态模型定义（Global + CN）作为 fallback
+ *  - 静态模型定义（仅 Qoder 官方路由模型）作为网络不可用时的最后兜底
  *  - 从 Qoder HTTP API 动态获取模型列表（参考 pi-provider-qoder）
  *  - 本地文件缓存，1小时过期
  *
@@ -70,7 +70,9 @@ function getBaseUrl(region: QoderRegion): string {
 }
 
 function getModelListURL(region: QoderRegion): string {
-  const url = `${getBaseUrl(region)}algo/api/v2/model/list`;
+  // CLI 使用 Encode=1 获取完整模型目录；缺少该参数时服务端返回缩减列表
+  // （缺少 Cantus/cmodel 等模型）。参考 pi-provider-qoder。
+  const url = `${getBaseUrl(region)}algo/api/v2/model/list?Encode=1`;
   log(`getModelListURL(${region}):`, url);
   return url;
 }
@@ -103,30 +105,24 @@ const CN_FRIENDLY: Record<string, { id: string; name: string; sdkKey: string }> 
 };
 
 // ─── Static Fallback Models ─────────────────────────────────────────────────
+// 静态表只保留 Qoder 官方路由模型，作为网络不可用时的最后兕底；第三方模型
+// （Qwen/Kimi/GLM/DeepSeek/MiniMax/Cantus 等）迭代频繁且 ID/上下文随服务端
+// 变化，完整目录一律以动态获取（fetchModelCatalog）为准。
 // 注意：所有模型统一声明 input: ["text"]——图片数据当前不会向 qodercli 传输
 // （context.ts 使用占位符降级），声明 image 会导致 opencode 向模型发送
 // 无法被处理的图片。待实现图片传输后再按各模型实际能力放开。
 export const staticGlobalModels: QoderModelDef[] = [
-  { id: "auto",        name: "Qoder Auto",        reasoning: true,  input: ["text"], contextWindow: 180_000,  maxTokens: 32768, sdkModelId: "auto" },
+  { id: "auto",        name: "Qoder Auto",        reasoning: true,  input: ["text"], contextWindow: 180_000,   maxTokens: 32768, sdkModelId: "auto" },
   { id: "ultimate",    name: "Qoder Ultimate",    reasoning: true,  input: ["text"], contextWindow: 1_000_000, maxTokens: 32768, sdkModelId: "ultimate" },
   { id: "performance", name: "Qoder Performance", reasoning: true,  input: ["text"], contextWindow: 1_000_000, maxTokens: 32768, sdkModelId: "performance" },
-  { id: "efficient",   name: "Qoder Efficient",   reasoning: false, input: ["text"], contextWindow: 180_000,  maxTokens: 32768, sdkModelId: "efficient" },
-  { id: "lite",        name: "Qoder Lite",        reasoning: false, input: ["text"],          contextWindow: 180_000,  maxTokens: 32768, sdkModelId: "lite" },
-  { id: "qmodel",      name: "Qwen3.7 Plus",      reasoning: false, input: ["text"], contextWindow: 1_000_000, maxTokens: 32768, sdkModelId: "qmodel" },
-  { id: "qmodel_latest", name: "Qwen3.7 Max",     reasoning: false, input: ["text"], contextWindow: 1_000_000, maxTokens: 32768, sdkModelId: "qmodel_latest" },
-  { id: "dmodel",      name: "DeepSeek V4 Pro",   reasoning: true,  input: ["text"], contextWindow: 1_000_000, maxTokens: 32768, sdkModelId: "dmodel" },
-  { id: "kmodel",      name: "Kimi K2.6",         reasoning: false, input: ["text"], contextWindow: 256_000,  maxTokens: 32768, sdkModelId: "kmodel" },
+  { id: "efficient",   name: "Qoder Efficient",   reasoning: false, input: ["text"], contextWindow: 180_000,   maxTokens: 32768, sdkModelId: "efficient" },
+  { id: "lite",        name: "Qoder Lite",        reasoning: false, input: ["text"], contextWindow: 180_000,   maxTokens: 32768, sdkModelId: "lite" },
 ];
 
-export const staticCnModels: QoderModelDef[] = Object.values(CN_FRIENDLY).map((f) => ({
-  id: f.id,
-  name: f.name,
-  reasoning: ["auto", "qmodel_latest", "qmodel", "q36fmodel", "dmodel", "gm51model", "kmodel"].includes(f.sdkKey),
-  input: ["text"],
-  contextWindow: f.sdkKey === "gm51model" || f.sdkKey === "mmodel" ? 200_000 : f.sdkKey === "kmodel" ? 256_000 : 1_000_000,
-  maxTokens: 32768,
-  sdkModelId: f.sdkKey,
-}));
+// CN 静态兕底同样只保留官方路由模型 auto；第三方模型由动态目录提供
+export const staticCnModels: QoderModelDef[] = [
+  { id: "auto", name: "Auto · Qoder CN", reasoning: true, input: ["text"], contextWindow: 180_000, maxTokens: 32768, sdkModelId: "auto" },
+];
 
 // ─── Cache (参考 pi-provider-qoder 的缓存模式) ──────────────────────────────
 function getCachePath(region: QoderRegion): string {
@@ -213,7 +209,9 @@ async function exchangePatForJobToken(
   return data.token;
 }
 
-// ─── COSY Auth Headers (参考 pi-provider-qoder，仅用于模型列表请求) ─────────
+// ─── COSY Auth Headers（参考 pi-provider-qoder 的完整签名实现）──────────
+// 注意：缺少任何一个 Cosy-* 头（尤其 Cosy-Sigpath/Bodyhash/Bodylength）
+// 或使用过老的 cosyVersion 都会导致 model list 返回 403 "Signature invalid"。
 const RSA_KEY = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 4k6Pz1EaDicBMpdpxKduSZu5OANqUq8er4GM95omAGIOPOh+Nx0spthYA2BqGz+l
@@ -221,45 +219,118 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`;
 
-function buildMinimalAuthHeaders(
+// 与当前 Qoder CLI 目录协议保持一致；旧值会导致目录缩减或签名校验失败
+const QODER_IDE_VERSION = "1.1.3";
+const QODER_CLIENT_TYPE = "5";
+const QODER_DATA_POLICY = "disagree";
+const QODER_LOGIN_VERSION = "v2";
+const QODER_MACHINE_TYPE = "5";
+const QODER_MACHINE_OS =
+  process.platform === "win32"
+    ? process.arch === "arm64" ? "aarch64_windows" : "x86_64_windows"
+    : process.arch === "arm64" ? "aarch64_linux" : "x86_64_linux";
+
+/** 机器 ID：优先读官方 CLI/参考实现已写入的文件，否则生成并持久化 */
+function getMachineId(): string {
+  const paths = [
+    join(homedir(), ".qoder", ".auth", "machine_id"),
+    join(homedir(), ".pi", "agent", "qoder-machine-id"),
+  ];
+  for (const p of paths) {
+    if (existsSync(p)) {
+      try {
+        const val = readFileSync(p, "utf8").trim();
+        if (val) return val;
+      } catch {}
+    }
+  }
+  const newId = crypto.randomUUID();
+  try {
+    mkdirSync(dirname(paths[1]), { recursive: true });
+    writeFileSync(paths[1], newId, "utf8");
+  } catch {}
+  return newId;
+}
+
+function computeSigPath(urlStr: string): string {
+  const parsed = new URL(urlStr);
+  let sigPath = parsed.pathname;
+  if (sigPath.startsWith("/algo")) {
+    sigPath = sigPath.substring("/algo".length);
+  }
+  return sigPath;
+}
+
+interface CosyCredentials {
+  userID: string;
+  authToken: string;
+  name?: string;
+  email?: string;
+}
+
+function buildAuthHeaders(
+  body: Buffer | string | null,
   requestURL: string,
-  userID: string,
-  authToken: string,
+  creds: CosyCredentials,
 ): Record<string, string> {
-  log("buildMinimalAuthHeaders: requestURL=", requestURL, "userID=", userID);
+  const parsed = safeValidateURL(requestURL, "buildAuthHeaders");
 
-  // 防御性 URL 校验
-  const parsed = safeValidateURL(requestURL, "buildMinimalAuthHeaders");
-
-  // 简化的 COSY 签名——仅用于模型列表 GET 请求
   const aesKey = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-  const userInfo = { uid: userID, security_oauth_token: authToken, name: "", aid: "", email: "" };
-  const infoB64 = crypto
-    .createCipheriv("aes-128-cbc", Buffer.from(aesKey), Buffer.from(aesKey))
-    .update(JSON.stringify(userInfo), "utf8", "base64");
+  const userInfo = {
+    uid: creds.userID,
+    security_oauth_token: creds.authToken,
+    name: creds.name || "",
+    aid: "",
+    email: creds.email || "",
+  };
+  const cipher = crypto.createCipheriv("aes-128-cbc", Buffer.from(aesKey), Buffer.from(aesKey));
+  const infoB64 = cipher.update(JSON.stringify(userInfo), "utf8", "base64") + cipher.final("base64");
   const cosyKey = crypto.publicEncrypt(
     { key: RSA_KEY, padding: crypto.constants.RSA_PKCS1_PADDING },
     Buffer.from(aesKey),
   ).toString("base64");
+
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  let sigPath = parsed.pathname;
-  if (sigPath.startsWith("/algo")) sigPath = sigPath.substring(5);
-  const payload = Buffer.from(
-    JSON.stringify({ version: "v1", requestId: crypto.randomUUID(), info: infoB64, cosyVersion: "1.0.0", ideVersion: "" }),
-  ).toString("base64");
-  const sig = crypto
-    .createHash("md5")
-    .update(`${payload}\n${cosyKey}\n${timestamp}\n\n${sigPath}`)
+  const payloadB64 = Buffer.from(JSON.stringify({
+    version: "v1",
+    requestId: crypto.randomUUID(),
+    info: infoB64,
+    cosyVersion: QODER_IDE_VERSION,
+    ideVersion: "",
+  })).toString("base64");
+  const sigPath = computeSigPath(requestURL);
+
+  const bodyStr = body ? (Buffer.isBuffer(body) ? body.toString("utf8") : body) : "";
+  const sig = crypto.createHash("md5")
+    .update(`${payloadB64}\n${cosyKey}\n${timestamp}\n${bodyStr}\n${sigPath}`)
     .digest("hex");
 
+  const bodyHash = crypto.createHash("md5").update(body || "").digest("hex");
+  const bodyLen = body ? (Buffer.isBuffer(body) ? body.length : Buffer.from(body).length).toString() : "0";
+  const machineID = getMachineId();
+
+  log("buildAuthHeaders: url=", requestURL, "sigPath=", sigPath);
+
   return {
-    Authorization: `Bearer COSY.${payload}.${sig}`,
+    Authorization: `Bearer COSY.${payloadB64}.${sig}`,
     "Cosy-Key": cosyKey,
-    "Cosy-User": userID,
+    "Cosy-User": creds.userID,
     "Cosy-Date": timestamp,
-    "Cosy-Version": "1.0.0",
-    "Cosy-Clienttype": "5",
-    "Login-Version": "v2",
+    "Cosy-Version": QODER_IDE_VERSION,
+    "Cosy-Machineid": machineID,
+    "Cosy-Machinetoken": machineID,
+    "Cosy-Machinetype": QODER_MACHINE_TYPE,
+    "Cosy-Machineos": QODER_MACHINE_OS,
+    "Cosy-Clienttype": QODER_CLIENT_TYPE,
+    "Cosy-Clientip": "127.0.0.1",
+    "Cosy-Bodyhash": bodyHash,
+    "Cosy-Bodylength": bodyLen,
+    "Cosy-Sigpath": sigPath,
+    "Cosy-Data-Policy": QODER_DATA_POLICY,
+    "Cosy-Organization-Id": "",
+    "Cosy-Organization-Tags": "",
+    "Login-Version": QODER_LOGIN_VERSION,
+    "X-Request-Id": crypto.randomUUID(),
   };
 }
 
@@ -316,14 +387,22 @@ export async function fetchModelCatalog(
     userInfo?.uid ||
     userInfo?.data?.uid ||
     "unknown";
-  log("fetchModelCatalog: userID=", userID);
+  // COSY info 加密体需要真实 name/email（与 uid 一同参与服务端校验）
+  const userName = userInfo?.name || userInfo?.data?.name || userInfo?.user?.name || "";
+  const userEmail = userInfo?.email || userInfo?.data?.email || userInfo?.user?.email || "";
+  log("fetchModelCatalog: userID=", userID, "name=", userName ? "(set)" : "(empty)", "email=", userEmail ? "(set)" : "(empty)");
 
   // Step 3: 获取模型列表 (使用 COSY 签名)
   const modelURL = getModelListURL(region);
   log("fetchModelCatalog: fetching model list at", modelURL);
   safeValidateURL(modelURL, "fetchModelCatalog-modelList");
 
-  const headers = buildMinimalAuthHeaders(modelURL, userID, jobToken);
+  const headers = buildAuthHeaders(null, modelURL, {
+    userID,
+    authToken: jobToken,
+    name: userName,
+    email: userEmail,
+  });
   let modelRes: Response;
   try {
     modelRes = await fetchWithTimeout(modelURL, {
@@ -362,31 +441,20 @@ export async function fetchModelCatalog(
       }
     }
 
-    if (region === "cn") {
-      // CN: 使用友好名称映射
-      const friendly = Object.values(CN_FRIENDLY).find((f) => f.sdkKey === key);
-      if (friendly) {
-        models.push({
-          id: friendly.id,
-          name: friendly.name,
-          reasoning: isReasoning,
-          input: ["text"],
-          contextWindow: ctxLen,
-          maxTokens: (entry.max_output_tokens as number) || 32768,
-          sdkModelId: key,
-        });
-      }
-    } else {
-      models.push({
-        id: key,
-        name: display,
-        reasoning: isReasoning,
-        input: ["text"],
-        contextWindow: ctxLen,
-        maxTokens: (entry.max_output_tokens as number) || 32768,
-        sdkModelId: key,
-      });
-    }
+    // CN 区域用 CN_FRIENDLY 做友好命名；映射未覆盖的新 key 仍收录（以 key/
+    // display_name 呈现），保证动态目录完整——第三方模型以服务端返回为准
+    const friendly = region === "cn"
+      ? Object.values(CN_FRIENDLY).find((f) => f.sdkKey === key)
+      : undefined;
+    models.push({
+      id: friendly?.id ?? key,
+      name: friendly?.name ?? display,
+      reasoning: isReasoning,
+      input: ["text"],
+      contextWindow: ctxLen,
+      maxTokens: (entry.max_output_tokens as number) || 32768,
+      sdkModelId: key,
+    });
   }
 
   // 确保 auto 存在

@@ -68,7 +68,8 @@ function buildModelMap(region: QoderRegion): Record<string, {
  * 动态模型发现：
  *  - 同步读取本地缓存（上次 fetchModelCatalog 的结果）
  *  - 异步刷新远端缓存（下次启动生效）
- *  - provider 返回所有已知模型定义，opencode 可选择性展示
+ *  - 注意：opencode 不读取 factory 返回的 models 对象（只调用 languageModel()），
+ *    模型列表由 plugin.ts 的 config hook 注入 opencode.json 的 provider.models
  */
 function createQoderProvider(options: QoderProviderOptions = {}) {
   const region = resolveRegion(options.region);
@@ -104,9 +105,10 @@ function createQoderProvider(options: QoderProviderOptions = {}) {
 
   return {
     /**
-     * 所有已知模型定义。
-     * opencode 可读取此 map 来填充模型选择器，
-     * 无需用户在 opencode.json 中逐个声明。
+     * 所有已知模型定义（缓存 + 静态 fallback）。
+     * 注意：opencode 不读取此字段——模型选择器的数据源是 opencode.json 中
+     * provider.models 的声明，本包通过 plugin.ts 的 config hook 自动注入。
+     * 此 map 仅供测试与编程式调用使用。
      */
     models: modelMap,
 

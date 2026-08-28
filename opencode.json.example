@@ -6,13 +6,6 @@
       "npm": "opencode-qoder-provider",
       "options": {
         "region": "global"
-      },
-      "models": {
-        "auto": { "name": "Qoder Auto" },
-        "ultimate": { "name": "Qoder Ultimate" },
-        "performance": { "name": "Qoder Performance" },
-        "efficient": { "name": "Qoder Efficient" },
-        "lite": { "name": "Qoder Lite" }
       }
     },
     "qoder-cn": {
@@ -20,14 +13,6 @@
       "npm": "opencode-qoder-provider",
       "options": {
         "region": "cn"
-      },
-      "models": {
-        "auto": { "name": "Auto · Qoder CN" },
-        "qwen3.7-max": { "name": "Qwen 3.7 Max" },
-        "qwen3.7-plus": { "name": "Qwen 3.7 Plus" },
-        "deepseek-v4-pro": { "name": "DeepSeek V4 Pro" },
-        "glm-5.2": { "name": "GLM 5.2" },
-        "kimi-k2.6": { "name": "Kimi K2.6" }
       }
     }
   },
