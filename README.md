@@ -314,21 +314,6 @@ src/
 └── plugin.ts       # opencode Plugin 入口（config hook 注入模型目录 / 事件处理）
 ```
 
-## 与 pi-qoder-provider 的关系
-
-工具桥接与 transcript 回放方案参考了
-[marcomishi-dot/pi-qoder-provider](https://github.com/marcomishi-dot/pi-qoder-provider)，
-模型目录 HTTP API 参考了
-[simonsmh/pi-provider-qoder](https://github.com/simonsmh/pi-provider-qoder)。
-
-| 方面 | pi-qoder-provider | 本包 |
-|------|-------------------|------|
-| 目标平台 | pi | opencode |
-| 工具传递 | 声明型 MCP 桥接 | 声明型 MCP 桥接（同方案） |
-| 多轮历史 | JSON transcript 回放 | JSON transcript 回放（同方案） |
-| 进程终止 | 工具边界立即 terminate | 工具边界立即 close（同策略） |
-| 模型目录 | 静态 | HTTP 动态 + 静态 fallback |
-
 ## 已知限制
 
 1. **图片输入部分支持**：最新 user 消息中的图片会以 Anthropic 风格 image block
@@ -363,3 +348,8 @@ node test-bridge.mjs  # 端到端测试（需要真实 PAT 与网络）
 ## License
 
 MIT — 见 [LICENSE](./LICENSE)
+
+## 参考
+
+- [marcomishi-dot/pi-qoder-provider](https://github.com/marcomishi-dot/pi-qoder-provider) — 声明型 MCP 工具桥接与 JSON transcript 回放方案
+- [simonsmh/pi-provider-qoder](https://github.com/simonsmh/pi-provider-qoder) — 模型目录 HTTP API
