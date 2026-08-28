@@ -205,8 +205,14 @@ src/
 
 1. **图片输入未实现**：所有模型当前只声明 `text` 输入。opencode 发来的图片/文件
    在 transcript 中降级为 `[file: mediaType]` 占位符，模型收不到图片数据
-2. **usage 可能为空**：工具调用轮次的 `message_delta` 事件不携带 usage 信息，
-   token 统计可能缺失（SDK 上游行为）
+2. **token 统计为估算值，$ spent 实为 Credits**：qodercli 不上报真实 token
+   计数（实测 `input_tokens`/`output_tokens`/`cache_*` 恒为 0，仅
+   `context_usage_ratio` 与 `credits` 有效）。本包用 ratio × 模型上下文窗口
+   估算输入 token、生成字符数 ÷ 4 粗估输出 token；而 TUI 侧边栏的
+   "$ spent" 显示的是 Qoder 服务端真实计量的 **Credits 数值**（经
+   providerMetadata 直通 opencode 的 cost 通路，非美元）——Credits 到
+   美元的换算随套餐不同（如 Teams 40 USD/席位/3000 Credits ≈
+   0.0133 USD/Credit），仅供相对消耗参考
 3. **每请求冷启动**：无状态设计意味着每次请求都 spawn 一个新的 qodercli 进程，
    首包延迟高于常驻连接
 4. **Bun 运行时**：opencode 是 Bun 编译二进制，SDK 默认 WorkerTransport 不兼容，

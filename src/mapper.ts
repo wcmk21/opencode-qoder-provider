@@ -9,7 +9,11 @@
  * 每个 Query 对应一个 StreamMapper 实例（per-query state）。
  */
 
-// ─── AI SDK V3 流式事件类型 ────────────────────────────────────────────────────
+// ─── AI SDK V3 流式事件类型 ────────────────────────────────────────────────
+/** JSON 兼容值（结构与 AI SDK 内部 JSONValue 一致，保证可赋给 SharedV3ProviderMetadata） */
+type JSONValue = null | string | number | boolean | { [key: string]: JSONValue | undefined } | JSONValue[];
+export type V3ProviderMetadata = Record<string, { [key: string]: JSONValue | undefined }>;
+
 export type V3StreamPart =
   | { type: "stream-start"; warnings: Array<{ type: string; message: string }> }
   | { type: "text-start"; id: string }
@@ -22,7 +26,7 @@ export type V3StreamPart =
   | { type: "tool-input-delta"; id: string; delta: string }
   | { type: "tool-input-end"; id: string }
   | { type: "tool-call"; toolCallId: string; toolName: string; input: string; providerExecuted?: boolean }
-  | { type: "finish"; finishReason: V3FinishReason; usage: V3Usage }
+  | { type: "finish"; finishReason: V3FinishReason; usage: V3Usage; providerMetadata?: V3ProviderMetadata }
   | { type: "error"; error: unknown }
   | { type: "raw"; rawValue: unknown };
 
@@ -46,6 +50,25 @@ interface BlockState {
   accumulatedArgs: string; // tool_use: accumulated JSON args
 }
 
+/** BetaUsage（qodercli 流式事件的 usage 结构，Anthropic 风格） */
+interface QoderUsage {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  context_usage_ratio?: number | null;
+  /** Qoder 请求级真实计量（折扣后 credits） */
+  credits?: number | null;
+}
+
+/** SDK result.modelUsage 的单模型条目（camelCase，见 SDK protocol/common.d.ts） */
+interface QoderModelUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+}
+
 // ─── StreamMapper ───────────────────────────────────────────────────────────
 export class StreamMapper {
   /** index → block 状态（per-query） */
@@ -55,9 +78,25 @@ export class StreamMapper {
   private emittedFinish = false;
   /** qodercli 侧工具名 → opencode 原名（声明型 MCP 桥接） */
   private toOpencodeName?: (providerName: string) => string | undefined;
+  /** 模型上下文窗口（用于 context_usage_ratio 估算输入 token） */
+  private contextWindow: number;
 
-  constructor(toOpencodeName?: (providerName: string) => string | undefined) {
+  // usage 累积状态：流式事件增量合并（max），result 权威替换（final）
+  private usageInput?: number;
+  private usageOutput?: number;
+  private usageCacheRead?: number;
+  private usageCacheWrite?: number;
+  /** 仅有 context_usage_ratio 时的输入估算值（真实 input_tokens 到达后被替换） */
+  private estimatedContext?: number;
+  /** 生成字符数累计（qodercli 不上报 output token，用字符数粗略估算） */
+  private outputChars = 0;
+  /** 服务端请求级真实计量（Qoder credits；0/缺失视为未报告） */
+  private credits?: number;
+  private pendingStopReason?: string | null;
+
+  constructor(toOpencodeName?: (providerName: string) => string | undefined, contextWindow?: number) {
     this.toOpencodeName = toOpencodeName;
+    this.contextWindow = contextWindow ?? 0;
   }
 
   /** 工具名映射：未知名转换为安全的占位名，由 opencode 返回 tool not found */
@@ -72,6 +111,14 @@ export class StreamMapper {
     this.messageId = "";
     this.modelId = "";
     this.emittedFinish = false;
+    this.usageInput = undefined;
+    this.usageOutput = undefined;
+    this.usageCacheRead = undefined;
+    this.usageCacheWrite = undefined;
+    this.estimatedContext = undefined;
+    this.outputChars = 0;
+    this.credits = undefined;
+    this.pendingStopReason = undefined;
   }
 
   /**
@@ -96,9 +143,10 @@ export class StreamMapper {
         return this.mapStreamEvent(msg.event);
 
       case "assistant":
-        // 完整 assistant 消息：本 provider 始终 includePartialMessages: true，
-        // stream_event 已覆盖相同内容，这里直接跳过，防止重复的
-        // text/reasoning/tool-call 事件（曾导致重复 reasoning block）
+        // 完整 assistant 消息：内容由 stream_event 覆盖（includePartialMessages
+        // 恒 true），但请求级 credits 官方指定从这里读取（result.usage 的
+        // credits 不可靠），跳过内容前先提取
+        this.applyUsage(msg.message?.usage, true);
         return [];
 
       case "result":
@@ -121,6 +169,8 @@ export class StreamMapper {
         if (message) {
           this.messageId = message.id || "";
           this.modelId = message.model || "";
+          // message_start.usage 可能携带 context_usage_ratio 等初始计量
+          this.applyUsage(message.usage, false);
         }
         parts.push({ type: "stream-start", warnings: [] });
         break;
@@ -174,16 +224,20 @@ export class StreamMapper {
           switch (delta.type) {
             case "text_delta":
               if (state) {
-                parts.push({ type: "text-delta", id: state.id, delta: delta.text || "" });
+                const text = delta.text || "";
+                this.outputChars += text.length;
+                parts.push({ type: "text-delta", id: state.id, delta: text });
               }
               break;
 
             case "thinking_delta":
               if (state) {
+                const thinking = delta.thinking || "";
+                this.outputChars += thinking.length;
                 parts.push({
                   type: "reasoning-delta",
                   id: state.id,
-                  delta: delta.thinking || "",
+                  delta: thinking,
                 });
               }
               break;
@@ -192,6 +246,7 @@ export class StreamMapper {
               if (state) {
                 const jsonDelta = delta.partial_json || "";
                 state.accumulatedArgs += jsonDelta;
+                this.outputChars += jsonDelta.length;
                 parts.push({
                   type: "tool-input-delta",
                   id: state.id,
@@ -237,28 +292,17 @@ export class StreamMapper {
       }
 
       case "message_delta": {
-        const stopReason = event.delta?.stop_reason;
-        const usage = event.usage;
-        parts.push({
-          type: "finish",
-          finishReason: this.mapStopReason(stopReason),
-          usage: this.mapUsage(usage),
-        });
-        this.emittedFinish = true;
+        // usage 增量合并 + stop_reason 暂存；finish 统一延迟到 result /
+        // flushFinish() 发出——立即发 finish 会用不完整的 usage 封顶，
+        // 且工具轮次终止进程后 result（权威 usage）再也无法补入
+        this.applyUsage(event.usage, false);
+        if (event.delta?.stop_reason) this.pendingStopReason = event.delta.stop_reason;
         break;
       }
 
       case "message_stop":
-        // 流结束——如果不曾发过 finish，补一个
-        // （置位 emittedFinish，避免后续 result 消息再次补发导致重复 finish 事件）
-        if (!this.emittedFinish) {
-          parts.push({
-            type: "finish",
-            finishReason: { unified: "stop", raw: undefined },
-            usage: this.emptyUsage(),
-          });
-          this.emittedFinish = true;
-        }
+        // 流结束标记——finish 统一由 result / flushFinish() 发出，此处不处理，
+        // 避免在权威 usage（result）到达前用不完整数据发出 finish
         break;
     }
 
@@ -277,15 +321,18 @@ export class StreamMapper {
         error: new Error(errors.map((e: any) => e.message).join("; ") || "Unknown error"),
       }];
     }
-    // result/success — 如果不曾发过 finish，补一个
-    if (!this.emittedFinish) {
-      return [{
-        type: "finish",
-        finishReason: { unified: "stop", raw: undefined },
-        usage: this.mapUsage(msg.usage),
-      }];
+    // result/success — 权威 usage（final 替换流式累积值），stop_reason 一并更新，
+    // 然后发出唯一的 finish（result 是工具轮次终止前最后的 usage 来源）
+    this.applyUsage(msg.usage, true);
+    this.applyModelUsage(msg.modelUsage);
+    // total_credits 是会话累计；本 provider 每请求独立 CLI 会话
+    // （persistSession: false），累计即本请求 credits，作为兜底回退
+    if (this.credits === undefined) {
+      const total = msg.total_credits;
+      if (typeof total === "number" && Number.isFinite(total) && total > 0) this.credits = total;
     }
-    return [];
+    if (msg.stop_reason) this.pendingStopReason = msg.stop_reason;
+    return this.flushFinish();
   }
 
   // ─── stop_reason 映射 ───────────────────────────────────────────────────
@@ -307,20 +354,95 @@ export class StreamMapper {
     }
   }
 
-  // ─── Usage 映射 ─────────────────────────────────────────────────────────
-  private mapUsage(usage: any): V3Usage {
-    const inputTokens = usage?.input_tokens ?? usage?.prompt_tokens ?? 0;
-    const outputTokens = usage?.output_tokens ?? usage?.completion_tokens ?? 0;
+  // ─── Usage 累积与发射 ────────────────────────────────────────────────────
+  /**
+   * 合并一帧 usage 数据。流式事件（message_start/message_delta）增量到达，
+   * 取 max 防止缺字段的后续帧覆盖已有值；result 为权威终值，直接替换。
+   *
+   * 重要：qodercli 上报的 token 计数字段在 0 值时表示"未报告"（实测
+   * input/output/cache 恒为 0，仅 context_usage_ratio 有效），因此 >0 才视为有效数据。
+   */
+  private applyUsage(usage: QoderUsage | undefined, final: boolean): void {
+    if (!usage || typeof usage !== "object") return;
+    const num = (v: unknown): number | undefined =>
+      typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined;
+    const merge = (current: number | undefined, direct: number | undefined): number | undefined =>
+      direct === undefined ? current : final ? direct : Math.max(current ?? 0, direct);
+
+    this.usageInput = merge(this.usageInput, num(usage.input_tokens));
+    this.usageOutput = merge(this.usageOutput, num(usage.output_tokens));
+    this.usageCacheRead = merge(this.usageCacheRead, num(usage.cache_read_input_tokens));
+    this.usageCacheWrite = merge(this.usageCacheWrite, num(usage.cache_creation_input_tokens));
+
+    // 仅有 context_usage_ratio 时按上下文窗口估算输入规模（真实 input_tokens 到达后替换）
+    const ratio = num(usage.context_usage_ratio);
+    if (ratio !== undefined && this.contextWindow > 0) {
+      const estimated = Math.min(this.contextWindow, Math.max(1, Math.round(ratio * this.contextWindow)));
+      this.estimatedContext = merge(this.estimatedContext, estimated);
+    }
+
+    // credits 是请求级总量（多帧重复携带同值），取 max 合并防旧帧覆盖
+    const credits = num(usage.credits);
+    if (credits !== undefined) this.credits = merge(this.credits, credits);
+  }
+
+  /** result.modelUsage 聚合兜底：direct usage 缺失的字段按各模型条目求和 */
+  private applyModelUsage(modelUsage: Record<string, QoderModelUsage> | undefined): void {
+    if (!modelUsage || typeof modelUsage !== "object") return;
+    const sum = (pick: (m: QoderModelUsage) => number | undefined): number | undefined => {
+      let total: number | undefined;
+      for (const m of Object.values(modelUsage)) {
+        const v = pick(m);
+        // 与 applyUsage 的 num 一致：0 表示"未报告"，不计入聚合，
+        // 否则全 0 的 modelUsage（实测形状）会以 0 封顶、挡住估算回退
+        if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+          total = (total ?? 0) + v;
+        }
+      }
+      return total;
+    };
+    if (this.usageInput === undefined) this.usageInput = sum((m) => m.inputTokens);
+    if (this.usageOutput === undefined) this.usageOutput = sum((m) => m.outputTokens);
+    if (this.usageCacheRead === undefined) this.usageCacheRead = sum((m) => m.cacheReadInputTokens);
+    if (this.usageCacheWrite === undefined) this.usageCacheWrite = sum((m) => m.cacheCreationInputTokens);
+  }
+
+  /** 当前累积 usage 的 V3 快照（无服务端数据时用本地估算兜底） */
+  private currentUsage(): V3Usage {
+    const input = this.usageInput ?? this.estimatedContext;
+    // qodercli 不上报 output token：按生成字符数粗估（≈4 字符/token，
+    // 英文较准、中文偏低估，仅供 UI 展示）
+    const output = this.usageOutput ?? (this.outputChars > 0 ? Math.ceil(this.outputChars / 4) : undefined);
     return {
-      inputTokens: { total: inputTokens || undefined, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
-      outputTokens: { total: outputTokens || undefined, text: outputTokens || undefined, reasoning: undefined },
+      inputTokens: { total: input, noCache: undefined, cacheRead: this.usageCacheRead, cacheWrite: this.usageCacheWrite },
+      outputTokens: { total: output, text: output, reasoning: undefined },
     };
   }
 
-  private emptyUsage(): V3Usage {
-    return {
-      inputTokens: { total: undefined, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
-      outputTokens: { total: undefined, text: undefined, reasoning: undefined },
+  /**
+   * 发出唯一的 finish（幂等）。
+   * model.ts 在循环结束 / 工具边界终止进程前调用，确保 finish 携带
+   * 此刻累积到的最完整 usage（result 权威值或流式增量）。
+   */
+  flushFinish(): V3StreamPart[] {
+    if (this.emittedFinish) return [];
+    this.emittedFinish = true;
+    const part: Extract<V3StreamPart, { type: "finish" }> = {
+      type: "finish",
+      finishReason: this.mapStopReason(this.pendingStopReason),
+      usage: this.currentUsage(),
     };
+    // credits 直通 opencode 的 cost：opencode getUsage 优先读
+    // providerMetadata["copilot"]["totalNanoAiu"] 并除以 1e11 作为 cost，
+    // credits × 1e11 使 $ spent 直接显示服务端真实计量（credits 数值，非 USD）
+    if (this.credits !== undefined) {
+      part.providerMetadata = { copilot: { totalNanoAiu: this.credits * 1e11 } };
+    }
+    return [part];
+  }
+
+  /** 是否已到达工具边界（暂存的 stop_reason=tool_use），供 model.ts 决定终止时机 */
+  isToolBoundary(): boolean {
+    return this.pendingStopReason === "tool_use";
   }
 }

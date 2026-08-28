@@ -105,7 +105,7 @@ const CN_FRIENDLY: Record<string, { id: string; name: string; sdkKey: string }> 
 };
 
 // ─── Static Fallback Models ─────────────────────────────────────────────────
-// 静态表只保留 Qoder 官方路由模型，作为网络不可用时的最后兕底；第三方模型
+// 静态表只保留 Qoder 官方路由模型，作为网络不可用时的最后兜底；第三方模型
 // （Qwen/Kimi/GLM/DeepSeek/MiniMax/Cantus 等）迭代频繁且 ID/上下文随服务端
 // 变化，完整目录一律以动态获取（fetchModelCatalog）为准。
 // 注意：所有模型统一声明 input: ["text"]——图片数据当前不会向 qodercli 传输
@@ -119,7 +119,7 @@ export const staticGlobalModels: QoderModelDef[] = [
   { id: "lite",        name: "Qoder Lite",        reasoning: false, input: ["text"], contextWindow: 180_000,   maxTokens: 32768, sdkModelId: "lite" },
 ];
 
-// CN 静态兕底同样只保留官方路由模型 auto；第三方模型由动态目录提供
+// CN 静态兜底同样只保留官方路由模型 auto；第三方模型由动态目录提供
 export const staticCnModels: QoderModelDef[] = [
   { id: "auto", name: "Auto · Qoder CN", reasoning: true, input: ["text"], contextWindow: 180_000, maxTokens: 32768, sdkModelId: "auto" },
 ];

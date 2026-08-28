@@ -25,7 +25,7 @@ import type {
   LanguageModelV3Content,
   LanguageModelV3StreamPart,
 } from "@ai-sdk/provider";
-import { StreamMapper, type V3FinishReason, type V3Usage } from "./mapper.js";
+import { StreamMapper, type V3FinishReason, type V3Usage, type V3ProviderMetadata } from "./mapper.js";
 import { findModel, type QoderModelDef, type QoderRegion } from "./models.js";
 import { resolveQoderCliPath } from "./cli-path.js";
 import { buildQoderToolBridge, OPENCODE_MCP_SERVER_KEY, type QoderToolBridge } from "./tool-bridge.js";
@@ -131,15 +131,11 @@ export class QoderLanguageModel implements LanguageModelV3 {
       },
     });
 
-    // 4. mapper：qodercli 侧工具名 → opencode 原名
-    const mapper = new StreamMapper((providerName) => bridge?.toOpencodeName(providerName));
+    // 4. mapper：qodercli 侧工具名 → opencode 原名；传入 contextWindow 供
+    //    usage 的 context_usage_ratio 估算输入 token
+    const mapper = new StreamMapper((providerName) => bridge?.toOpencodeName(providerName), this.modelDef?.contextWindow);
 
     return { q, mapper, built, bridge };
-  }
-
-  /** 判断是否到达权威工具边界（模型要调用工具，本轮结束） */
-  private static isToolBoundary(parts: Array<{ type: string; finishReason?: V3FinishReason }>): boolean {
-    return parts.some((p) => p.type === "finish" && p.finishReason?.unified === "tool-calls");
   }
 
   // ── doGenerate (非流式) ──────────────────────────────────────────────────
@@ -153,6 +149,7 @@ export class QoderLanguageModel implements LanguageModelV3 {
       inputTokens: { total: undefined, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
       outputTokens: { total: undefined, text: undefined, reasoning: undefined },
     };
+    let providerMetadata: V3ProviderMetadata | undefined;
 
     let textBuffer = "";
     let reasoningBuffer = "";
@@ -181,15 +178,25 @@ export class QoderLanguageModel implements LanguageModelV3 {
             case "finish":
               finishReason = part.finishReason;
               usage = part.usage;
+              providerMetadata = part.providerMetadata;
               break;
             case "error":
               throw part.error instanceof Error ? part.error : new Error(String(part.error));
           }
         }
         // 权威工具边界：立即终止，防止 deny 触发 qodercli 第二轮模型调用
-        if (QoderLanguageModel.isToolBoundary(parts)) {
+        if (mapper.isToolBoundary()) {
           toolBoundary = true;
           break;
+        }
+      }
+      // 补发 finish（幂等）：result 已发过时为空；工具边界终止时 result 不会
+      // 到达，用累积 usage 发出——保证 usage 不因提前终止而丢失
+      for (const part of mapper.flushFinish()) {
+        if (part.type === "finish") {
+          finishReason = part.finishReason;
+          usage = part.usage;
+          providerMetadata = part.providerMetadata;
         }
       }
     } finally {
@@ -211,6 +218,7 @@ export class QoderLanguageModel implements LanguageModelV3 {
       content,
       finishReason,
       usage,
+      providerMetadata,
       warnings: [],
     };
   }
@@ -252,10 +260,16 @@ export class QoderLanguageModel implements LanguageModelV3 {
               safeEnqueue(part as LanguageModelV3StreamPart);
             }
             // 权威工具边界：立即终止，防止 deny 触发 qodercli 第二轮模型调用
-            if (QoderLanguageModel.isToolBoundary(parts)) {
+            if (mapper.isToolBoundary()) {
               logInfo(`doStream: tool boundary reached, terminating qodercli (msgs=${msgCount})`);
               break;
             }
+          }
+          // 补发 finish（幂等）：result 已发过时为空；工具边界/提前终止时
+          // 携带累积 usage 发出——保证 opencode 每轮都能拿到 token 统计
+          for (const part of mapper.flushFinish()) {
+            partCount++;
+            safeEnqueue(part as LanguageModelV3StreamPart);
           }
           logInfo(`doStream: query completed for model=${self.modelId}, msgs=${msgCount}, parts=${partCount}`);
           safeClose();

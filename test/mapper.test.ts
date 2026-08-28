@@ -104,32 +104,31 @@ describe("StreamMapper 事件映射", () => {
     });
   });
 
-  it("message_delta 映射 stop_reason=tool_use → unified tool-calls", () => {
+  it("message_delta 暂存 stop_reason 与 usage，finish 延迟到 flushFinish", () => {
     const m = new StreamMapper();
-    const parts = m.map(messageDelta("tool_use", { input_tokens: 10, output_tokens: 5 }));
-    expect(parts[0]).toEqual({
+    // 不再立即发 finish（避免用不完整 usage 封顶）
+    expect(m.map(messageDelta("tool_use", { input_tokens: 10, output_tokens: 5 }))).toEqual([]);
+    expect(m.isToolBoundary()).toBe(true);
+    expect(m.flushFinish()).toEqual([{
       type: "finish",
       finishReason: { unified: "tool-calls", raw: "tool_use" },
       usage: {
         inputTokens: { total: 10, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
         outputTokens: { total: 5, text: 5, reasoning: undefined },
       },
-    });
+    }]);
   });
 
-  it("max_tokens → length", () => {
+  it("max_tokens → length（flush 时映射）", () => {
     const m = new StreamMapper();
-    const parts = m.map(messageDelta("max_tokens"));
-    expect(parts[0].type === "finish" && parts[0].finishReason.unified).toBe("length");
+    m.map(messageDelta("max_tokens"));
+    const fin = m.flushFinish()[0];
+    expect(fin.type === "finish" && fin.finishReason.unified).toBe("length");
   });
 
-  it("message_stop 在无 finish 时补发 stop，且只补发一次", () => {
+  it("message_stop 不再直接发 finish（统一由 flushFinish 发出）", () => {
     const m = new StreamMapper();
     m.map(messageStart());
-    const first = m.map(messageStop);
-    expect(first).toHaveLength(1);
-    expect(first[0].type).toBe("finish");
-    // 第二次 message_stop（异常重复流）不再补发
     expect(m.map(messageStop)).toEqual([]);
   });
 
@@ -153,16 +152,26 @@ describe("StreamMapper 事件映射", () => {
     expect((parts[0] as { error: Error }).error.message).toBe("boom");
   });
 
-  it("result success 在无 finish 时补发 stop", () => {
+  it("result success 发出 finish（权威 usage）", () => {
     const m = new StreamMapper();
-    const parts = m.map({ type: "result", subtype: "success", usage: { input_tokens: 3 } });
-    expect(parts[0].type).toBe("finish");
+    const parts = m.map({ type: "result", subtype: "success", usage: { input_tokens: 3, output_tokens: 7 } });
+    expect(parts).toHaveLength(1);
+    expect(parts[0]).toEqual({
+      type: "finish",
+      finishReason: { unified: "stop", raw: undefined },
+      usage: {
+        inputTokens: { total: 3, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+        outputTokens: { total: 7, text: 7, reasoning: undefined },
+      },
+    });
   });
 
-  it("finish 已发出的 result success 不再重复发 finish", () => {
+  it("finish 只发一次：flushFinish 幂等，result 不重复", () => {
     const m = new StreamMapper();
     m.map(messageDelta("end_turn"));
-    expect(m.map({ type: "result", subtype: "success" })).toEqual([]);
+    expect(m.flushFinish()).toHaveLength(1);
+    expect(m.map({ type: "result", subtype: "success", usage: { input_tokens: 3 } })).toEqual([]);
+    expect(m.flushFinish()).toEqual([]);
   });
 
   it("reset() 清空块状态", () => {
@@ -171,5 +180,161 @@ describe("StreamMapper 事件映射", () => {
     m.map(blockStart(0, { type: "text" }));
     m.reset();
     expect(m.map(blockStop(0))).toEqual([]);
+  });
+});
+
+describe("StreamMapper usage 累积", () => {
+  it("流式增量取 max 合并，result 权威替换，cache 字段透传", () => {
+    const m = new StreamMapper(undefined, 200_000);
+    m.map(messageStart());
+    m.map(messageDelta(null, { input_tokens: 100, output_tokens: 20 }));
+    // 缺字段的后续帧不得覆盖已有值
+    m.map(messageDelta("end_turn", { input_tokens: 60, output_tokens: 25, cache_read_input_tokens: 40 }));
+    const parts = m.map({
+      type: "result",
+      subtype: "success",
+      usage: { input_tokens: 150, output_tokens: 30, cache_read_input_tokens: 50, cache_creation_input_tokens: 10 },
+    });
+    expect(parts[0].type).toBe("finish");
+    const fin = parts[0] as { type: string; usage: { inputTokens: Record<string, unknown>; outputTokens: Record<string, unknown> } };
+    expect(fin.usage.inputTokens).toMatchObject({ total: 150, cacheRead: 50, cacheWrite: 10 });
+    expect(fin.usage.outputTokens).toMatchObject({ total: 30, text: 30 });
+  });
+
+  it("仅有 context_usage_ratio 时按 contextWindow 估算输入", () => {
+    const m = new StreamMapper(undefined, 200_000);
+    m.map(messageDelta(null, { context_usage_ratio: 0.25 }));
+    const fin = m.flushFinish()[0];
+    expect(fin.type === "finish" && fin.usage.inputTokens.total).toBe(50_000);
+  });
+
+  it("真实 input_tokens 优先于 ratio 估算", () => {
+    const m = new StreamMapper(undefined, 200_000);
+    m.map(messageDelta(null, { context_usage_ratio: 0.25, input_tokens: 42 }));
+    const fin = m.flushFinish()[0];
+    expect(fin.type === "finish" && fin.usage.inputTokens.total).toBe(42);
+  });
+
+  it("result.modelUsage 聚合兜底（direct usage 缺失字段）", () => {
+    const m = new StreamMapper();
+    const parts = m.map({
+      type: "result",
+      subtype: "success",
+      usage: {},
+      modelUsage: {
+        gmodel: { inputTokens: 30, outputTokens: 5, cacheReadInputTokens: 7, cacheCreationInputTokens: 2 },
+        auto: { inputTokens: 12, outputTokens: 3, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+      },
+    });
+    // map(result) 的返回值即含 finish（mapResult 内部已 flush）
+    expect(parts).toHaveLength(1);
+    const fin = parts[0] as { type: string; usage: { inputTokens: Record<string, unknown>; outputTokens: Record<string, unknown> } };
+    expect(fin.type).toBe("finish");
+    expect(fin.usage.inputTokens).toMatchObject({ total: 42, cacheRead: 7, cacheWrite: 2 });
+    expect(fin.usage.outputTokens).toMatchObject({ total: 8 });
+  });
+
+  it("无任何 usage 数据时 finish 携带 undefined（不伪造 0）", () => {
+    const m = new StreamMapper();
+    const parts = m.map({ type: "result", subtype: "success" });
+    expect(parts).toHaveLength(1);
+    const fin = parts[0] as { type: string; usage: { inputTokens: { total: number | undefined } } };
+    expect(fin.type).toBe("finish");
+    expect(fin.usage.inputTokens.total).toBeUndefined();
+  });
+
+  it("工具轮次：流式 usage 累积在进程终止前随 flush 发出", () => {
+    const m = new StreamMapper();
+    m.map(messageStart());
+    m.map(blockStart(0, { type: "tool_use", id: "c1", name: "bash" }));
+    m.map(blockStop(0));
+    m.map(messageDelta("tool_use", { input_tokens: 500, output_tokens: 80 }));
+    // model.ts 在 isToolBoundary() 后 break，result 不会到达
+    expect(m.isToolBoundary()).toBe(true);
+    const fin = m.flushFinish()[0];
+    expect(fin.type === "finish" && fin.finishReason.unified).toBe("tool-calls");
+    expect(fin.type === "finish" && fin.usage.inputTokens.total).toBe(500);
+  });
+
+  it("qodercli 真实形状：token 全 0 回退 ratio 估算输入 + 字符估算输出", () => {
+    const m = new StreamMapper(undefined, 180_000);
+    m.map(messageStart());
+    m.map(blockStart(0, { type: "text" }));
+    m.map(blockDelta(0, { type: "text_delta", text: "hi there!" })); // 9 chars
+    m.map(blockStop(0));
+    // 实测（debug-usage.mjs）：message_delta/result 的 token 字段全 0，仅 ratio 有效
+    m.map(messageDelta("end_turn", {
+      input_tokens: 0, output_tokens: 0,
+      cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+      context_usage_ratio: 0.0185,
+    }));
+    const parts = m.map({
+      type: "result",
+      subtype: "success",
+      usage: { input_tokens: 0, output_tokens: 0, context_usage_ratio: 0.0185 },
+    });
+    const fin = parts[0] as { type: string; usage: { inputTokens: Record<string, unknown>; outputTokens: Record<string, unknown> } };
+    expect(fin.type).toBe("finish");
+    // 输入 = round(0.0185 × 180_000) = 3330
+    expect(fin.usage.inputTokens.total).toBe(3330);
+    // 输出 = ceil(9 / 4) = 3
+    expect(fin.usage.outputTokens.total).toBe(3);
+  });
+
+  it("modelUsage 全 0（实测形状）不产生 0 封顶，估算回退仍生效", () => {
+    const m = new StreamMapper(undefined, 180_000);
+    const parts = m.map({
+      type: "result",
+      subtype: "success",
+      usage: { input_tokens: 0, output_tokens: 0, context_usage_ratio: 0.05 },
+      modelUsage: { lite: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+    });
+    const fin = parts[0] as { type: string; usage: { inputTokens: Record<string, unknown>; outputTokens: Record<string, unknown> } };
+    expect(fin.type).toBe("finish");
+    expect(fin.usage.inputTokens.total).toBe(9000); // round(0.05 × 180_000)
+    expect(fin.usage.outputTokens.total).toBeUndefined(); // 无字符、无真实值
+  });
+
+  it("credits（message_delta 实测来源）直通 finish 的 copilot totalNanoAiu", () => {
+    const m = new StreamMapper();
+    const credits = 0.030271428571428567;
+    m.map(messageDelta("end_turn", { credits }));
+    const fin = m.flushFinish()[0] as {
+      type: string;
+      providerMetadata?: Record<string, Record<string, unknown>>;
+    };
+    expect(fin.type).toBe("finish");
+    // opencode getUsage: cost = totalNanoAiu / 1e11 = credits
+    expect(fin.providerMetadata?.copilot?.totalNanoAiu).toBeCloseTo(credits * 1e11, 6);
+  });
+
+  it("assistant 消息的 request-level credits 被提取（官方推荐来源）", () => {
+    const m = new StreamMapper();
+    m.map({ type: "assistant", message: { content: [], usage: { credits: 0.5 } } });
+    const fin = m.flushFinish()[0] as { providerMetadata?: Record<string, Record<string, unknown>> };
+    expect(fin.providerMetadata?.copilot?.totalNanoAiu).toBeCloseTo(0.5e11, 6);
+  });
+
+  it("result.total_credits 作为兜底回退（usage 无 credits 时）", () => {
+    const m = new StreamMapper();
+    const parts = m.map({
+      type: "result",
+      subtype: "success",
+      usage: { input_tokens: 0, output_tokens: 0 },
+      total_credits: 0.12,
+    });
+    const fin = parts[0] as { providerMetadata?: Record<string, Record<string, unknown>> };
+    expect(fin.providerMetadata?.copilot?.totalNanoAiu).toBeCloseTo(0.12e11, 6);
+  });
+
+  it("无 credits 时 finish 不携带 providerMetadata；credits=0 视为未报告", () => {
+    const m1 = new StreamMapper();
+    const fin1 = m1.flushFinish()[0] as { providerMetadata?: unknown };
+    expect(fin1.providerMetadata).toBeUndefined();
+
+    const m2 = new StreamMapper();
+    m2.map(messageDelta("end_turn", { credits: 0 }));
+    const fin2 = m2.flushFinish()[0] as { providerMetadata?: unknown };
+    expect(fin2.providerMetadata).toBeUndefined();
   });
 });
