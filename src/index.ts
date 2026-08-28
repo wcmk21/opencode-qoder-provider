@@ -8,7 +8,7 @@
  * {
  *   "provider": {
  *     "qoder": {
- *       "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
+ *       "npm": "github:wcmk21/opencode-qoder-provider",
  *       "name": "Qoder",
  *       "options": { "region": "global" },
  *       "models": {

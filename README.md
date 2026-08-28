@@ -78,10 +78,45 @@ opencode TUI
 
 ## 安装
 
-本插件**不经 npm 分发**，通过 opencode 的依赖解析机制直接加载本地或 Git 仓库中的
-构建产物。共两步：获取产物 → 接入 opencode。
+本插件**不经 npm 分发**，构建产物（dist/）直接提交在本仓库中，因此推荐把
+Git 仓库当作安装源，无需 clone 或本地构建。
 
-### 第一步：获取构建产物
+### 方式一：Git 直装（推荐）
+
+在 opencode.json 中（项目级，或全局 `~/.config/opencode/opencode.json` 对所有项目生效）：
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "qoder": {
+      "npm": "github:wcmk21/opencode-qoder-provider",
+      "name": "Qoder",
+      "options": { "region": "global" }
+    }
+  },
+  "plugin": ["github:wcmk21/opencode-qoder-provider"]
+}
+```
+
+- opencode 底层用 Bun 安装依赖，`npm` 字段支持 `github:` / `git+https://` 规格；
+  建议在仓库打版本 tag 后锁定，如 `github:wcmk21/opencode-qoder-provider#v0.1.0`
+- **若你的 opencode 版本对 `plugin` 字段的 git 规格支持不佳**（官方文档仅明确
+  npm 包名），改用下面纯 Bun 机制的等价写法：项目 `.opencode/package.json`
+  声明依赖（opencode 启动时自动 `bun install`），再在项目插件目录放两行转发器：
+
+  ```jsonc
+  // .opencode/package.json
+  { "dependencies": { "opencode-qoder-provider": "github:wcmk21/opencode-qoder-provider" } }
+  ```
+
+  ```ts
+  // .opencode/plugins/qoder.ts
+  import { QoderPlugin } from "opencode-qoder-provider/plugin"
+  export default QoderPlugin
+  ```
+
+### 方式二：本地构建 + file:// 引用（本地开发）
 
 ```bash
 git clone https://github.com/wcmk21/opencode-qoder-provider.git
@@ -89,11 +124,9 @@ cd opencode-qoder-provider
 npm install && npm run build   # 构建产物在 dist/
 ```
 
-### 第二步：接入 opencode
-
-**方式 A：项目级接入（推荐）** — 在项目的 opencode.json 中用 `file://` 指向构建产物。
-注意两点：`provider.npm` 指向 `dist/index.js`；`plugin` 数组直接指向 `dist/plugin.js`
-文件（npm 包名未发布时无法被解析）：
+然后在 opencode.json 中用 `file://` 指向构建产物。**注意两点**：`provider.npm`
+指向 `dist/index.js`；`plugin` 数组直接指向 `dist/plugin.js`
+文件：
 
 ```jsonc
 {
@@ -108,40 +141,10 @@ npm install && npm run build   # 构建产物在 dist/
 }
 ```
 
-**方式 B：全局接入（多项目共用）** — 不想每个项目都写配置时，把上面的
-`provider` + `plugin` 声明放进 opencode 的全局配置
-`~/.config/opencode/opencode.json`（Windows：`%USERPROFILE%\.config\opencode\opencode.json`）；
-`file://` 按绝对路径解析，全局声明对所有项目生效。`plugin` 部分也可以改为把
-`dist/plugin.js` 放入全局插件目录 `~/.config/opencode/plugins/`（目录不存在则创建），
-该目录下的文件启动时自动加载，无需 `plugin` 字段。
-
-**方式 C：项目内依赖（插件侧）** — 在项目 `.opencode/package.json` 中以 `file:`
-依赖引入本包，opencode 启动时会自动安装到 `.opencode/node_modules`，项目插件
-目录中放一个两行转发器即可（构建更新后无需再手动拷贝产物）：
-
-```jsonc
-// .opencode/package.json
-{ "dependencies": { "opencode-qoder-provider": "file:../opencode-qoder-provider" } }
-```
-
-```ts
-// .opencode/plugins/qoder.ts
-import { QoderPlugin } from "opencode-qoder-provider/plugin"
-export default QoderPlugin
-```
-
-> provider 侧（`provider.npm`）仍需方式 A 的 `file://` 写法；方式 C 只优化插件侧的
-> 依赖管理与产物同步。
-
-**方式 D：Git 直装（分发给别人）** — 将 `dist/` 从 `.gitignore` 移除并提交（或把
-构建 tarball 挂到 GitHub Releases），使用者无需 clone，直接写：
-
-```jsonc
-"npm": "github:wcmk21/opencode-qoder-provider"
-```
-
-opencode 底层用 Bun 安装依赖，支持 `github:` / `git+https` / tarball URL 规格。
-`plugin` 侧让使用者把 `dist/plugin.js` 放入其全局插件目录即可。
+> 两种方式中，`plugin` 部分（插件钩子）都可以改用**插件目录自动发现**替代：
+> 把 `dist/plugin.js` 放入全局插件目录 `~/.config/opencode/plugins/`（目录不存在则
+> 创建），或项目级 `.opencode/plugins/`，该目录下的文件启动时自动加载，
+> 无需 `plugin` 字段。
 
 > **提示**：修改源码重新 build 后若行为未变化，需清理 opencode 的包缓存
 > （`~/.cache/opencode/packages/`，Windows 为 `%USERPROFILE%\.cache\opencode\packages\`）
@@ -197,6 +200,12 @@ $env:QODER_PERSONAL_ACCESS_TOKEN = "pt-your-token-here"
 > `provider.models` 的声明，provider 包内部返回的模型目录不会被读取；
 > 本包通过插件的 config hook 在启动时把动态目录（HTTP API + 静态 fallback，
 > 含 1 小时缓存）自动写入 `provider.models`。
+>
+> **为什么需要 `provider` 和 `plugin` 两处配置？** opencode 中这是两个独立机制：
+> `provider.npm` 声明的是**模型后端**（实现 LanguageModelV3 接口，负责"怎么跟
+> Qoder 对话"——prompt 组装、调用 qodercli、流式响应映射）；`plugin` 声明的是
+> **宿主钩子**（负责在启动时把动态模型目录注入 opencode 的模型列表）。两者
+> 加载的是同一个包的两个入口：`dist/index.js` 与 `dist/plugin.js`。
 >
 > 手动声明是可选的：若在 opencode.json 中写了 `models`，其中字段
 > （如自定义 `name`）会覆盖注入的默认值，未声明的模型仍会自动出现：

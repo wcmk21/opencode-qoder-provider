@@ -3,23 +3,25 @@
   "provider": {
     "qoder": {
       "name": "Qoder",
-      // 本插件不经 npm 分发：file:// 指向构建产物（先 clone 仓库并 npm run build）。
-      // 若 dist/ 已提交进仓库，也可写成 "github:wcmk21/opencode-qoder-provider"。
-      "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
+      // 推荐：Git 直装（构建产物 dist/ 已提交在仓库中，无需 clone 构建）。
+      // 建议在仓库打 tag 后锁定版本，如 "github:wcmk21/opencode-qoder-provider#v0.1.0"。
+      "npm": "github:wcmk21/opencode-qoder-provider",
       "options": {
         "region": "global"
       }
     },
     "qoder-cn": {
       "name": "Qoder CN",
-      "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
+      "npm": "github:wcmk21/opencode-qoder-provider",
       "options": {
         "region": "cn"
       }
     }
   },
-  // plugin 直接指向 dist/plugin.js 文件（路径按 opencode.json 所在目录解析）；
-  // 也可以把 dist/plugin.js 放入 ~/.config/opencode/plugins/ 全局插件目录，
-  // 由 opencode 启动时自动加载，此字段即可省略。
-  "plugin": ["C:/path/to/opencode-qoder-provider/dist/plugin.js"]
+  // plugin 加载同一个包的 ./plugin 导出（dist/plugin.js，插件钩子：注入模型目录）。
+  // 若你的 opencode 版本对 plugin 字段的 git 规格支持不佳，两种等价替代：
+  //   1) 项目 .opencode/package.json 声明该 github: 依赖，并在 .opencode/plugins/
+  //      放两行转发器：import { QoderPlugin } from "opencode-qoder-provider/plugin"
+  //   2) 把 dist/plugin.js 放入 ~/.config/opencode/plugins/ 全局插件目录
+  "plugin": ["github:wcmk21/opencode-qoder-provider"]
 }
