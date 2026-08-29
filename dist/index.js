@@ -1046,6 +1046,36 @@ function oneShotUserMessage(contentBlocks) {
     };
   })();
 }
+var REQUEST_TIMEOUT_MS = 10 * 6e4;
+function createLinkedAbortController(hostSignal, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const signals = [];
+  if (hostSignal) signals.push(hostSignal);
+  if (timeoutMs > 0) signals.push(AbortSignal.timeout(timeoutMs));
+  const cleanups = [];
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    const listener = () => controller.abort(signal.reason);
+    signal.addEventListener("abort", listener, { once: true });
+    cleanups.push(() => signal.removeEventListener("abort", listener));
+  }
+  return {
+    controller,
+    cleanup() {
+      for (const fn of cleanups) fn();
+    }
+  };
+}
+function describeQueryError(error, abort, hostSignal) {
+  const timedOut = !!abort?.controller.signal.aborted && !hostSignal?.aborted;
+  if (timedOut) {
+    return new Error(`Qoder request timed out after ${Math.round(REQUEST_TIMEOUT_MS / 6e4)} minutes`);
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
 var QoderLanguageModel = class {
   specificationVersion = "v3";
   provider = "qoder";
@@ -1079,6 +1109,7 @@ var QoderLanguageModel = class {
    */
   prepare(options) {
     this.ensurePat();
+    const abort = createLinkedAbortController(options.abortSignal, REQUEST_TIMEOUT_MS);
     const bridge = buildQoderToolBridge(options.tools);
     const built = buildQoderPrompt(options.prompt, (name) => bridge?.toProviderName(name));
     const systemPrompt = withTransportNotice(built.systemPrompt, bridge !== void 0);
@@ -1110,15 +1141,17 @@ var QoderLanguageModel = class {
           canUseTool: bridge.canUseTool,
           permissionMode: "default"
         } : { permissionMode: "acceptEdits" },
-        ...options.abortSignal ? { abortSignal: options.abortSignal } : {}
+        // SDK 只认 abortController；宿主 abort 或超时触发时 SDK close
+        // query 并三阶段终止子进程（此前 abortSignal 键会被 SDK 静默忽略）
+        abortController: abort.controller
       }
     });
     const mapper = new StreamMapper((providerName) => bridge?.toOpencodeName(providerName), this.modelDef?.contextWindow);
-    return { q, mapper, built, bridge };
+    return { q, mapper, built, bridge, abort };
   }
   // ── doGenerate (非流式) ──────────────────────────────────────────────────
   async doGenerate(options) {
-    const { q, mapper, built, bridge } = this.prepare(options);
+    const { q, mapper, built, bridge, abort } = this.prepare(options);
     logInfo(`doGenerate called: model=${this.modelId}, history=${built.hasHistory}, tools=${bridge?.toolCount ?? 0}`);
     const content = [];
     let finishReason = { unified: "stop", raw: void 0 };
@@ -1171,7 +1204,10 @@ var QoderLanguageModel = class {
           providerMetadata = part.providerMetadata;
         }
       }
+    } catch (error) {
+      throw describeQueryError(error, abort, options.abortSignal);
     } finally {
+      abort.cleanup();
       await q.close().catch(() => {
       });
     }
@@ -1195,6 +1231,7 @@ var QoderLanguageModel = class {
   async doStream(options) {
     const self = this;
     let q;
+    let abort;
     const stream = new ReadableStream({
       async start(controller) {
         const safeEnqueue = (part) => {
@@ -1212,6 +1249,7 @@ var QoderLanguageModel = class {
         try {
           const prepared = self.prepare(options);
           q = prepared.q;
+          abort = prepared.abort;
           const { mapper, built, bridge } = prepared;
           logInfo(`doStream: starting query() for model=${self.modelDef?.sdkModelId || self.modelId}, history=${built.hasHistory}, tools=${bridge?.toolCount ?? 0}`);
           log(`doStream: prompt=${JSON.stringify(built.userText).slice(0, 300)}`);
@@ -1239,18 +1277,22 @@ var QoderLanguageModel = class {
           logInfo(`doStream: query completed for model=${self.modelId}, msgs=${msgCount}, parts=${partCount}`);
           safeClose();
         } catch (error) {
-          logError(`doStream: query error for model=${self.modelId}:`, error instanceof Error ? error.message : String(error));
+          const timedOut = abort?.controller.signal.aborted && !options.abortSignal?.aborted;
+          const described = describeQueryError(error, abort, options.abortSignal);
+          logError(`doStream: query error for model=${self.modelId}:`, described.message);
           safeEnqueue({
             type: "error",
-            error: error instanceof Error ? error : new Error(String(error))
+            error: described
           });
           safeClose();
         } finally {
+          abort?.cleanup();
           if (q) await q.close().catch(() => {
           });
         }
       },
       async cancel() {
+        abort?.cleanup();
         if (q) await q.close().catch(() => {
         });
       }

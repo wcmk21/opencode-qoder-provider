@@ -60,6 +60,69 @@ function oneShotUserMessage(
   })();
 }
 
+// ─── Abort 联动与请求超时 ───────────────────────────────────────────────────
+/**
+ * 请求超时上限（与 pi-qoder-provider 的 DEFAULT_TIMEOUT_MS 对齐）。
+ * CLI 挂死（存活但不输出）且宿主未取消时，SDK 的 for-await 会永久 pending，
+ * 超时 abort 是最后一道兜底。
+ */
+export const REQUEST_TIMEOUT_MS = 10 * 60_000;
+
+export interface LinkedAbort {
+  controller: AbortController;
+  /** 移除转发监听；query 结束后调用，避免 timeout signal 上的监听残留 */
+  cleanup(): void;
+}
+
+/**
+ * 创建内部 AbortController，把「宿主取消信号」与「请求超时」统一转发给 SDK。
+ *
+ * SDK 的 query options 只接受 abortController（AbortController 实例，
+ * abort() 时 SDK close 并三阶段终止子进程）；AI SDK 传入的是 abortSignal，
+ * 此前以 abortSignal 键透传会被 SDK 静默忽略，abort 时只剩
+ * ReadableStream.cancel() 单保险（doGenerate 路径完全没有兜底）。
+ */
+export function createLinkedAbortController(
+  hostSignal?: AbortSignal,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): LinkedAbort {
+  const controller = new AbortController();
+  const signals: AbortSignal[] = [];
+  if (hostSignal) signals.push(hostSignal);
+  if (timeoutMs > 0) signals.push(AbortSignal.timeout(timeoutMs));
+
+  const cleanups: Array<() => void> = [];
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    const listener = () => controller.abort(signal.reason);
+    signal.addEventListener("abort", listener, { once: true });
+    cleanups.push(() => signal.removeEventListener("abort", listener));
+  }
+
+  return {
+    controller,
+    cleanup() {
+      for (const fn of cleanups) fn();
+    },
+  };
+}
+
+/** SDK 层错误转换：超时（非宿主 abort）给明确消息；其余原样透传 */
+function describeQueryError(
+  error: unknown,
+  abort: LinkedAbort | undefined,
+  hostSignal: AbortSignal | undefined,
+): Error {
+  const timedOut = !!abort?.controller.signal.aborted && !hostSignal?.aborted;
+  if (timedOut) {
+    return new Error(`Qoder request timed out after ${Math.round(REQUEST_TIMEOUT_MS / 60_000)} minutes`);
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 // ─── QoderLanguageModel ─────────────────────────────────────────────────────
 export class QoderLanguageModel implements LanguageModelV3 {
   readonly specificationVersion = "v3" as const;
@@ -111,6 +174,9 @@ export class QoderLanguageModel implements LanguageModelV3 {
   private prepare(options: LanguageModelV3CallOptions) {
     this.ensurePat();
 
+    // 0. Abort 联动：宿主取消 + 请求超时 → SDK abortController（见 createLinkedAbortController）
+    const abort = createLinkedAbortController(options.abortSignal, REQUEST_TIMEOUT_MS);
+
     // 1. 声明型 MCP 工具桥接：把 opencode 工具 schema 暴露给 qodercli（不执行）
     const bridge = buildQoderToolBridge(options.tools as any);
 
@@ -150,7 +216,9 @@ export class QoderLanguageModel implements LanguageModelV3 {
           canUseTool: bridge.canUseTool,
           permissionMode: "default" as const,
         } : { permissionMode: "acceptEdits" as const }),
-        ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
+        // SDK 只认 abortController；宿主 abort 或超时触发时 SDK close
+        // query 并三阶段终止子进程（此前 abortSignal 键会被 SDK 静默忽略）
+        abortController: abort.controller,
       },
     });
 
@@ -158,12 +226,12 @@ export class QoderLanguageModel implements LanguageModelV3 {
     //    usage 的 context_usage_ratio 估算输入 token
     const mapper = new StreamMapper((providerName) => bridge?.toOpencodeName(providerName), this.modelDef?.contextWindow);
 
-    return { q, mapper, built, bridge };
+    return { q, mapper, built, bridge, abort };
   }
 
   // ── doGenerate (非流式) ──────────────────────────────────────────────────
   async doGenerate(options: LanguageModelV3CallOptions): Promise<LanguageModelV3GenerateResult> {
-    const { q, mapper, built, bridge } = this.prepare(options);
+    const { q, mapper, built, bridge, abort } = this.prepare(options);
     logInfo(`doGenerate called: model=${this.modelId}, history=${built.hasHistory}, tools=${bridge?.toolCount ?? 0}`);
 
     const content: LanguageModelV3Content[] = [];
@@ -222,7 +290,10 @@ export class QoderLanguageModel implements LanguageModelV3 {
           providerMetadata = part.providerMetadata;
         }
       }
+    } catch (error) {
+      throw describeQueryError(error, abort, options.abortSignal);
     } finally {
+      abort.cleanup();
       await q.close().catch(() => {});
     }
     logInfo(`doGenerate completed: finish=${finishReason.unified}, toolBoundary=${toolBoundary}`);
@@ -249,9 +320,10 @@ export class QoderLanguageModel implements LanguageModelV3 {
   // ── doStream ─────────────────────────────────────────────────────────────
   async doStream(options: LanguageModelV3CallOptions): Promise<LanguageModelV3StreamResult> {
     const self = this;
-    // q 提升到闭包外层：cancel() 时可主动终止 qodercli 子进程，
+    // q / abort 提升到闭包外层：cancel() 时可主动终止 qodercli 子进程，
     // 避免 start() 卡在迭代/背压上导致 finally 永不执行、进程残留
     let q: ReturnType<typeof query> | undefined;
+    let abort: ReturnType<typeof createLinkedAbortController> | undefined;
 
     const stream = new ReadableStream<LanguageModelV3StreamPart>({
       async start(controller) {
@@ -266,6 +338,7 @@ export class QoderLanguageModel implements LanguageModelV3 {
         try {
           const prepared = self.prepare(options);
           q = prepared.q;
+          abort = prepared.abort;
           const { mapper, built, bridge } = prepared;
           logInfo(`doStream: starting query() for model=${self.modelDef?.sdkModelId || self.modelId}, history=${built.hasHistory}, tools=${bridge?.toolCount ?? 0}`);
           log(`doStream: prompt=${JSON.stringify(built.userText).slice(0, 300)}`);
@@ -297,19 +370,23 @@ export class QoderLanguageModel implements LanguageModelV3 {
           logInfo(`doStream: query completed for model=${self.modelId}, msgs=${msgCount}, parts=${partCount}`);
           safeClose();
         } catch (error) {
-          logError(`doStream: query error for model=${self.modelId}:`, error instanceof Error ? error.message : String(error));
+          const timedOut = abort?.controller.signal.aborted && !options.abortSignal?.aborted;
+          const described = describeQueryError(error, abort, options.abortSignal);
+          logError(`doStream: query error for model=${self.modelId}:`, described.message);
           safeEnqueue({
             type: "error",
-            error: error instanceof Error ? error : new Error(String(error)),
+            error: described,
           } as LanguageModelV3StreamPart);
           safeClose();
         } finally {
+          abort?.cleanup();
           if (q) await q.close().catch(() => {});
         }
       },
 
       async cancel() {
         // TUI 中断（ESC）：abortSignal 之外的双保险，主动终止 qodercli 子进程
+        abort?.cleanup();
         if (q) await q.close().catch(() => {});
       },
     });

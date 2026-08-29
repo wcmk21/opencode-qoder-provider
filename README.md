@@ -135,7 +135,7 @@ git 规格，构建产物已提交在仓库中，无需 clone 或本地构建：
 ```
 
 - 规格统一使用 `github:` 简写（`git+https://` 完整形式与之等价）；建议在仓库打
-  版本 tag 后锁定，如 `github:wcmk21/opencode-qoder-provider#v0.1.1`，此时预热
+  版本 tag 后锁定，如 `github:wcmk21/opencode-qoder-provider#v0.1.2`，此时预热
   命令中的规格需与 opencode.json 完全一致
 
 **首次使用前必须手动预热**。opencode 用内置安装器（@npmcli/arborist）自动安装
@@ -173,7 +173,7 @@ opencode 把 `provider.npm` / `plugin` 字段的安装结果缓存在固定目�
 - Windows：`packages\github_wcmk21\opencode-qoder-provider`
 - Linux / macOS：`packages/github:wcmk21/opencode-qoder-provider`
 
-若规格带版本 tag（如 `#v0.1.1`），tag 会原样进入目录名（`#` 无需转义），预热命令
+若规格带版本 tag（如 `#v0.1.2`），tag 会原样进入目录名（`#` 无需转义），预热命令
 的 `--prefix` 需相应调整。
 
 ## 配置
