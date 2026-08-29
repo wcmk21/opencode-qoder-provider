@@ -4,7 +4,7 @@
     "qoder": {
       "name": "Qoder",
       // 推荐：Git 直装（构建产物 dist/ 已提交在仓库中，无需 clone 构建）。
-      // 建议在仓库打 tag 后锁定版本，如 "github:wcmk21/opencode-qoder-provider#v0.1.0"。
+      // 建议在仓库打 tag 后锁定版本，如 "github:wcmk21/opencode-qoder-provider#v0.1.1"。
       "npm": "github:wcmk21/opencode-qoder-provider",
       "options": {
         "region": "global"
