@@ -78,12 +78,47 @@ opencode TUI
 
 ## 安装
 
-本插件**不经 npm 分发**，构建产物（dist/）直接提交在本仓库中，因此推荐把
-Git 仓库当作安装源，无需 clone 或本地构建。
+本插件**不经 npm 分发**，构建产物（dist/）直接提交在本仓库中。两种接入方式按
+稳定性排序：**方式一（本地路径）完全绕开 opencode 内置安装器与网络安装环节，
+最稳，首选**；**方式二（Git 直装）免 clone 免构建，但首次使用前必须手动预热**
+（原因与命令见下）。
 
-### 方式一：Git 直装（推荐）
+### 方式一：本地构建 + file:// 引用（推荐）
 
-在 opencode.json 中（项目级，或全局 `~/.config/opencode/opencode.json` 对所有项目生效）：
+```bash
+git clone https://github.com/wcmk21/opencode-qoder-provider.git
+cd opencode-qoder-provider
+npm install && npm run build   # 构建产物在 dist/
+```
+
+在 opencode.json 中（项目级，或全局 `~/.config/opencode/opencode.json` 对所有项目
+生效）用 `file://` 指向构建产物。**注意两点**：`provider.npm` 指向 `dist/index.js`；
+`plugin` 数组直接指向 `dist/plugin.js` 文件（Windows 路径用正斜杠即可）：
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "qoder": {
+      "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
+      "name": "Qoder",
+      "options": { "region": "global" }
+    }
+  },
+  "plugin": ["C:/path/to/opencode-qoder-provider/dist/plugin.js"]
+}
+```
+
+- 修改源码重新 build 后若行为未变化，需清理 opencode 的包缓存（见
+  [包缓存位置](#包缓存位置)）并重启 opencode，避免加载到旧版本
+- `plugin` 部分可以改用**插件目录自动发现**替代：把 `dist/plugin.js` 放入全局
+  插件目录 `~/.config/opencode/plugins/`（目录不存在则创建），或项目级
+  `.opencode/plugins/`，该目录下的文件启动时自动加载，无需 `plugin` 字段
+
+### 方式二：Git 直装 + 手动预热
+
+在 opencode.json 中（项目级，或全局 `~/.config/opencode/opencode.json`）直接使用
+git 规格，构建产物已提交在仓库中，无需 clone 或本地构建：
 
 ```jsonc
 {
@@ -99,67 +134,47 @@ Git 仓库当作安装源，无需 clone 或本地构建。
 }
 ```
 
-- opencode 底层用 npm 的安装器（@npmcli/arborist）解析 `provider.npm` 与
-  `plugin` 字段的依赖规格，支持 `github:` / `git+https://` 规格（两者等价，
-  `github:` 是简写，均已实测可用）；建议在仓库打版本 tag 后锁定，如
-  `github:wcmk21/opencode-qoder-provider#v0.1.1`
+- 规格统一使用 `github:` 简写（`git+https://` 完整形式与之等价）；建议在仓库打
+  版本 tag 后锁定，如 `github:wcmk21/opencode-qoder-provider#v0.1.1`，此时预热
+  命令中的规格需与 opencode.json 完全一致
 
-> **已知问题（Windows 实测，opencode ≤ 1.18.x）**：opencode 自动安装 git 依赖时，
-> 可能在"包本体落盘"环节静默挂起——症状是缓存目录里依赖树已生成，但
-> `node_modules/opencode-qoder-provider` 缺失，全程无任何报错，`/models` 中
-> 不出现 Qoder。判定与解决见[故障排查](#故障排查)的"git 直装后模型不出现"
-> 条目；也可改用下方显式声明依赖的等价写法。
+**首次使用前必须手动预热**。opencode 用内置安装器（@npmcli/arborist）自动安装
+`provider.npm` 与 `plugin` 字段的依赖，在网络环境不佳（尤其依赖经镜像源）时，可能
+在"包本体落盘"环节静默挂起——症状是包缓存目录里依赖树已生成，但
+`node_modules/opencode-qoder-provider` 本体缺失，全程无任何报错，`/models` 中不
+出现 Qoder（opencode 对安装失败不写文件日志，错误仅发往会话事件流，所以完全静默）。
+用系统 npm 把包预先装进 opencode 的包缓存目录（目录名由规格 sanitize 而来，见
+[包缓存位置](#包缓存位置)），opencode 启动时即可离线复用，不再联网安装：
 
-- **若 git 规格安装仍失败**（官方文档仅明确 npm 包名），可改为在项目
-  `.opencode/package.json` 显式声明依赖，再在项目插件目录放两行转发器
-  （opencode 启动时自动安装 `.opencode` 依赖，1.18.x 用的是内置 npm 安装器，
-  无需系统安装 bun；但 git 规格走的是同一个安装器，若命中上述挂起 bug，
-  同样用预热法处理）：
-
-  ```jsonc
-  // .opencode/package.json
-  { "dependencies": { "opencode-qoder-provider": "github:wcmk21/opencode-qoder-provider" } }
-  ```
-
-  ```ts
-  // .opencode/plugins/qoder.ts
-  import { QoderPlugin } from "opencode-qoder-provider/plugin"
-  export default QoderPlugin
-  ```
-
-### 方式二：本地构建 + file:// 引用（本地开发）
+```powershell
+# Windows PowerShell（规格需与 opencode.json 中所写完全一致）
+npm install "github:wcmk21/opencode-qoder-provider" --prefix "$env:USERPROFILE\.cache\opencode\packages\github_wcmk21\opencode-qoder-provider"
+```
 
 ```bash
-git clone https://github.com/wcmk21/opencode-qoder-provider.git
-cd opencode-qoder-provider
-npm install && npm run build   # 构建产物在 dist/
+# Linux / macOS（缓存子目录名原样保留冒号，与 Windows 的 github_wcmk21 不同）
+npm install "github:wcmk21/opencode-qoder-provider" --prefix "$HOME/.cache/opencode/packages/github:wcmk21/opencode-qoder-provider"
 ```
 
-然后在 opencode.json 中用 `file://` 指向构建产物。**注意两点**：`provider.npm`
-指向 `dist/index.js`；`plugin` 数组直接指向 `dist/plugin.js`
-文件：
+预热完成后启动 opencode，`/models` 中应出现 Qoder 分组。
 
-```jsonc
-{
-  "provider": {
-    "qoder": {
-      "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
-      "name": "Qoder",
-      "options": { "region": "global" }
-    }
-  },
-  "plugin": ["C:/path/to/opencode-qoder-provider/dist/plugin.js"]
-}
-```
+### 包缓存位置
 
-> 两种方式中，`plugin` 部分（插件钩子）都可以改用**插件目录自动发现**替代：
-> 把 `dist/plugin.js` 放入全局插件目录 `~/.config/opencode/plugins/`（目录不存在则
-> 创建），或项目级 `.opencode/plugins/`，该目录下的文件启动时自动加载，
-> 无需 `plugin` 字段。
+opencode 把 `provider.npm` / `plugin` 字段的安装结果缓存在固定目录，预热、清理
+旧版本、排查"模型不出现"都要用到：
 
-> **提示**：修改源码重新 build 后若行为未变化，需清理 opencode 的包缓存
-> （`~/.cache/opencode/packages/`，Windows 为 `%USERPROFILE%\.cache\opencode\packages\`）
-> 并重启 opencode，避免加载到旧版本。
+- Windows：`%USERPROFILE%\.cache\opencode\packages\`
+- Linux / macOS：`~/.cache/opencode/packages/`
+
+子目录名由 opencode.json 所写规格字符串 sanitize 而来（Windows 把 `:` 等非法字符
+换 `_`、`/` 成子路径；Linux/macOS 不做替换、原样保留）。以
+`github:wcmk21/opencode-qoder-provider` 为例：
+
+- Windows：`packages\github_wcmk21\opencode-qoder-provider`
+- Linux / macOS：`packages/github:wcmk21/opencode-qoder-provider`
+
+若规格带版本 tag（如 `#v0.1.1`），tag 会原样进入目录名（`#` 无需转义），预热命令
+的 `--prefix` 需相应调整。
 
 ## 配置
 
@@ -305,7 +320,7 @@ MiniMax / Cantus 等）迭代频繁，不进入静态表，由动态目录提供
 | 现象 | 排查步骤 |
 |------|----------|
 | `/models` 中没有 Qoder 分组 | 1）确认 opencode.json 同时配置了 `provider` 与 `plugin` 字段（两者缺一不可）；2）查看日志中是否有 `[qoder-plugin] injected N models`；3）PAT 未设置时仅会出现静态兜底模型（5 个官方路由模型），而不是完整目录 |
-| git 直装后 `/models` 无 Qoder 且日志无 `injected`（配置确认无误） | opencode 自动安装 git 依赖可能在"包本体落盘"环节静默挂起（Windows 实测，opencode ≤ 1.18.x）。检查包缓存 `~/.cache/opencode/packages/` 下对应规格目录（目录名由 opencode.json 所写规格 sanitize 而来——`:` 换 `_`、`/` 成子路径：`github:` 简写形如 `github_wcmk21/opencode-qoder-provider`，完整 `git+https` 形如 `opencode-qoder-provider@git+https_/github.com/wcmk21/opencode-qoder-provider.git`）：若其中 `node_modules/` 下没有 `opencode-qoder-provider` 本体，在该目录手动执行 `npm install "opencode-qoder-provider@git+https://github.com/wcmk21/opencode-qoder-provider.git"` 预热后重启 opencode；或改用方式一末尾的显式依赖声明写法（其自动安装走同一安装器，命中挂起时同样需预热）。opencode 自身对插件安装失败不写文件日志（错误仅发往会话事件流），所以此问题完全静默 |
+| Git 直装后 `/models` 无 Qoder 且日志无 `injected`（配置确认无误） | opencode 自动安装 git 依赖可能在"包本体落盘"环节静默挂起（网络不佳时，依赖树已落盘但本体缺失，全程无报错——安装错误仅发往会话事件流，不写日志）。按[方式二](#方式二git-直装--手动预热)的预热命令把包手动装进包缓存后重启：Windows `npm install "github:wcmk21/opencode-qoder-provider" --prefix "$env:USERPROFILE\.cache\opencode\packages\github_wcmk21\opencode-qoder-provider"`，Linux/macOS 目录名保留冒号（见[包缓存位置](#包缓存位置)）；或改用[方式一](#方式一本地构建--file-引用推荐)的本地路径 |
 | 模型列表比预期少 | 模型目录来自 HTTP API（1 小时缓存）。看日志是否有 403 / 网络错误；删除模型缓存 `~/.opencode/qoder-models.json`（CN 为 `qoder-cn-models.json`）后重启强制刷新 |
 | 调用报 `Set QODER_PERSONAL_ACCESS_TOKEN` | PAT 未传到模型调用层：确认环境变量名拼写（CN 区需 `QODERCN_PERSONAL_ACCESS_TOKEN`），或改用 `options.apiKey`；Windows 下 `$env:` 设置仅在当前会话生效 |
 | 修改配置 / 重新构建后不生效 | 清理 opencode 包缓存 `~/.cache/opencode/packages/` 与模型目录缓存 `~/.opencode/qoder-*.json`，重启 opencode（opencode 启动时缓存旧插件与目录） |

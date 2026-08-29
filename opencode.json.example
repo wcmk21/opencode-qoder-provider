@@ -1,27 +1,60 @@
 {
   "$schema": "https://opencode.ai/config.json",
+
+  // ============================================================
+  // 方式一（第一优先级 · 推荐）：本地构建 + file:// 引用
+  //
+  // 先构建（完全绕开 opencode 内置安装器，最稳）：
+  //   git clone https://github.com/wcmk21/opencode-qoder-provider.git
+  //   cd opencode-qoder-provider && npm install && npm run build
+  //
+  // 注意：provider.npm 指向 dist/index.js；plugin 数组直接指向 dist/plugin.js 文件。
+  // Windows 路径用正斜杠即可，按实际 clone 位置替换。
+  // ============================================================
   "provider": {
     "qoder": {
       "name": "Qoder",
-      // 推荐：Git 直装（构建产物 dist/ 已提交在仓库中，无需 clone 构建）。
-      // 建议在仓库打 tag 后锁定版本，如 "github:wcmk21/opencode-qoder-provider#v0.1.1"。
-      "npm": "github:wcmk21/opencode-qoder-provider",
-      "options": {
-        "region": "global"
-      }
-    },
-    "qoder-cn": {
-      "name": "Qoder CN",
-      "npm": "github:wcmk21/opencode-qoder-provider",
-      "options": {
-        "region": "cn"
-      }
+      "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
+      "options": { "region": "global" }
     }
   },
-  // plugin 加载同一个包的 ./plugin 导出（dist/plugin.js，插件钩子：注入模型目录）。
-  // 若你的 opencode 版本对 plugin 字段的 git 规格支持不佳，两种等价替代：
-  //   1) 项目 .opencode/package.json 声明该 github: 依赖，并在 .opencode/plugins/
-  //      放两行转发器：import { QoderPlugin } from "opencode-qoder-provider/plugin"
-  //   2) 把 dist/plugin.js 放入 ~/.config/opencode/plugins/ 全局插件目录
-  "plugin": ["github:wcmk21/opencode-qoder-provider"]
+  "plugin": ["C:/path/to/opencode-qoder-provider/dist/plugin.js"]
+
+  // ============================================================
+  // 方式二（第二优先级）：Git 直装 github: 规格 + 首次启动前手动预热
+  //
+  // 把上面 provider.qoder.npm 与 plugin 整体替换为：
+  //   "provider": {
+  //     "qoder": {
+  //       "name": "Qoder",
+  //       "npm": "github:wcmk21/opencode-qoder-provider",
+  //       "options": { "region": "global" }
+  //     }
+  //   },
+  //   "plugin": ["github:wcmk21/opencode-qoder-provider"]
+  //
+  // 【必须预热】opencode 内置安装器在网络不佳（尤其依赖经镜像源）时，可能在
+  // "包本体落盘"环节静默挂起（无报错、/models 不出现 Qoder）。首次使用前用系统
+  // npm 把包预先装进 opencode 的包缓存目录（子目录名 = 规格 sanitize：
+  // Windows 把 ":" 等非法字符换 "_"，"/" 为子路径；Linux/macOS 原样保留冒号）：
+  //
+  //   Windows PowerShell:
+  //   npm install "github:wcmk21/opencode-qoder-provider" --prefix "$env:USERPROFILE\.cache\opencode\packages\github_wcmk21\opencode-qoder-provider"
+  //
+  //   Linux / macOS:
+  //   npm install "github:wcmk21/opencode-qoder-provider" --prefix "$HOME/.cache/opencode/packages/github:wcmk21/opencode-qoder-provider"
+  //
+  // 建议在仓库打 tag 后锁定版本，如 "github:wcmk21/opencode-qoder-provider#v0.1.1"
+  // （预热命令中的规格与 --prefix 需随之同步调整，tag 原样进入目录名）。
+  // ============================================================
+
+  // 双区域并存（可选）：在 provider 下再加一个，规格与上面所选方式一致：
+  // "qoder-cn": {
+  //   "name": "Qoder CN",
+  //   "npm": "file://C:/path/to/opencode-qoder-provider/dist/index.js",
+  //   "options": { "region": "cn" }
+  // }
+
+  // 设为默认模型（可选）：
+  // "model": "qoder/auto"
 }
